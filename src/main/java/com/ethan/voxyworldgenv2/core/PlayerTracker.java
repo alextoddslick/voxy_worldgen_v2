@@ -4,46 +4,92 @@ import net.minecraft.server.level.ServerPlayer;
 
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Set;
+import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class PlayerTracker {
     private static final PlayerTracker INSTANCE = new PlayerTracker();
-    private final Set<ServerPlayer> players;
-    private final java.util.Map<java.util.UUID, it.unimi.dsi.fastutil.longs.LongSet> syncedChunks;
-    
+
+    // Keyed by UUID, not by the ServerPlayer object.
+    //
+    // Entity.hashCode() is the entity id, which is not stable across a player's session: respawning
+    // after death yields a ServerPlayer carrying a different id. A hash set keyed on the player
+    // object therefore probes the wrong bucket when removing on disconnect, the entry is never
+    // removed, and the generation worker never sees an empty player list -- so it keeps generating
+    // chunks forever for nobody. Measured on a 1.21.1 dedicated server: this tracker reported 1
+    // player while the server's own player list reported 0, with generation still running.
+    private final Map<UUID, ServerPlayer> players;
+    private final Map<UUID, it.unimi.dsi.fastutil.longs.LongSet> syncedChunks;
+
     private PlayerTracker() {
-        this.players = ConcurrentHashMap.newKeySet();
+        this.players = new ConcurrentHashMap<>();
         this.syncedChunks = new ConcurrentHashMap<>();
     }
-    
+
     public static PlayerTracker getInstance() {
         return INSTANCE;
     }
-    
+
     public void addPlayer(ServerPlayer player) {
-        players.add(player);
-        syncedChunks.put(player.getUUID(), it.unimi.dsi.fastutil.longs.LongSets.synchronize(new it.unimi.dsi.fastutil.longs.LongOpenHashSet()));
+        UUID id = player.getUUID();
+        players.put(id, player);
+        syncedChunks.computeIfAbsent(id, k ->
+            it.unimi.dsi.fastutil.longs.LongSets.synchronize(new it.unimi.dsi.fastutil.longs.LongOpenHashSet()));
     }
-    
+
     public void removePlayer(ServerPlayer player) {
-        players.remove(player);
-        syncedChunks.remove(player.getUUID());
+        UUID id = player.getUUID();
+        players.remove(id);
+        syncedChunks.remove(id);
     }
-    
+
     public void clear() {
         players.clear();
         syncedChunks.clear();
     }
-    
-    public Collection<ServerPlayer> getPlayers() {
-        return Collections.unmodifiableCollection(players);
+
+    /**
+     * Reconciles this tracker against the server's authoritative player list.
+     *
+     * <p>Necessary because {@code ServerPlayConnectionEvents.DISCONNECT} is not guaranteed to fire.
+     * Measured on 1.21.1: a Carpet fake player that died left the game — {@code PlayerList.remove}
+     * ran and "left the game" was logged — yet the event never fired, so the entry was never removed
+     * and the generation worker never saw an empty player list. It then generated chunks forever for
+     * nobody. Any disconnect path that bypasses the connection's onDisconnect hook has the same
+     * effect, so the tracker reconciles rather than trusting the event alone.
+     *
+     * <p>Also refreshes stale references: respawning replaces a player's {@code ServerPlayer}
+     * instance, and the old one is removed from the world. Holding it would mean reading a dead
+     * entity's position and sending packets to a defunct connection.
+     *
+     * @return number of entries dropped
+     */
+    public int reconcile(net.minecraft.server.MinecraftServer server) {
+        if (server == null) return 0;
+        int removed = 0;
+        for (var it = players.entrySet().iterator(); it.hasNext(); ) {
+            var entry = it.next();
+            ServerPlayer live = server.getPlayerList().getPlayer(entry.getKey());
+            if (live == null || live.hasDisconnected()) {
+                it.remove();
+                syncedChunks.remove(entry.getKey());
+                removed++;
+            } else if (live != entry.getValue()) {
+                entry.setValue(live);
+            }
+        }
+        return removed;
     }
 
-    public it.unimi.dsi.fastutil.longs.LongSet getSyncedChunks(java.util.UUID uuid) {
+    public Collection<ServerPlayer> getPlayers() {
+        return Collections.unmodifiableCollection(players.values());
+    }
+
+    public it.unimi.dsi.fastutil.longs.LongSet getSyncedChunks(UUID uuid) {
         return syncedChunks.get(uuid);
     }
-    
+
     public int getPlayerCount() {
         return players.size();
     }

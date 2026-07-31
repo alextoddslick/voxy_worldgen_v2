@@ -54,5 +54,9 @@ public final class Config {
         public int update_interval = 20; // legacy field for Compat
         public int maxQueueSize = 20000;
         public int maxActiveTasks = 20;
+        // Per-player LOD bandwidth cap in megabits/sec. 0 = unlimited (the historical behaviour).
+        // Measured uncapped throughput on loopback was ~35 Mbps for a single player, so on a
+        // metered or remote-hosted server this wants setting.
+        public double maxMbpsPerPlayer = 0.0;
     }
 }
