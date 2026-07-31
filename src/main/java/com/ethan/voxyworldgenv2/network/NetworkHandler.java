@@ -10,7 +10,7 @@ import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
-import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ChunkPos;
@@ -24,8 +24,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class NetworkHandler {
-    public static final Identifier HANDSHAKE_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":handshake");
-    public static final Identifier LOD_DATA_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":lod_data");
+    public static final ResourceLocation HANDSHAKE_ID = ResourceLocation.parse(VoxyWorldGenV2.MOD_ID + ":handshake");
+    public static final ResourceLocation LOD_DATA_ID = ResourceLocation.parse(VoxyWorldGenV2.MOD_ID + ":lod_data");
 
     // keep individual packets well under Netty's 2MB limit to prevent connection resets on public servers
     private static final int MAX_PACKET_BYTES = 32_768;
@@ -74,7 +74,7 @@ public class NetworkHandler {
 
         public LODDataPayload(RegistryFriendlyByteBuf buf) {
             this(
-                ResourceKey.create(Registries.DIMENSION, Identifier.parse(buf.readUtf())),
+                ResourceKey.create(Registries.DIMENSION, ResourceLocation.parse(buf.readUtf())),
                 buf.readChunkPos(),
                 buf.readInt(),
                 buf.readCollection(ArrayList::new, b -> SectionData.read((RegistryFriendlyByteBuf) b))
@@ -82,7 +82,7 @@ public class NetworkHandler {
         }
 
         public void write(RegistryFriendlyByteBuf buf) {
-            buf.writeUtf(dimension.identifier().toString());
+            buf.writeUtf(dimension.location().toString());
             buf.writeChunkPos(pos);
             buf.writeInt(minY);
             // cast to avoid ambiguous writeCollection / BiConsumer type issues
@@ -117,7 +117,7 @@ public class NetworkHandler {
 
     public static void broadcastLODData(LevelChunk chunk) {
         ChunkPos pos = chunk.getPos();
-        int minY = chunk.getMinSectionY();
+        int minY = chunk.getMinSection();
         List<LODDataPayload.SectionData> sections = buildSections(chunk);
 
         if (sections.isEmpty()) return;
@@ -139,7 +139,7 @@ public class NetworkHandler {
 
     public static void sendLODData(ServerPlayer player, LevelChunk chunk) {
         ChunkPos pos = chunk.getPos();
-        int minY = chunk.getMinSectionY();
+        int minY = chunk.getMinSection();
         List<LODDataPayload.SectionData> sections = buildSections(chunk);
 
         if (sections.isEmpty()) {
@@ -153,7 +153,7 @@ public class NetworkHandler {
 
     private static List<LODDataPayload.SectionData> buildSections(LevelChunk chunk) {
         ChunkPos pos = chunk.getPos();
-        int minY = chunk.getMinSectionY();
+        int minY = chunk.getMinSection();
         List<LODDataPayload.SectionData> sections = new ArrayList<>();
         var lightEngine = chunk.getLevel().getLightEngine();
 

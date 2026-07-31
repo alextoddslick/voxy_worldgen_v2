@@ -9,9 +9,10 @@ import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
-import net.minecraft.world.level.chunk.PalettedContainerFactory;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.core.Holder;
+import net.minecraft.core.Registry;
+import net.minecraft.core.registries.Registries;
 
 public class NetworkClientHandler {
     
@@ -52,9 +53,11 @@ public class NetworkClientHandler {
             io.netty.buffer.ByteBuf statesRaw = io.netty.buffer.Unpooled.wrappedBuffer(sectionData.states());
             io.netty.buffer.ByteBuf biomesRaw = io.netty.buffer.Unpooled.wrappedBuffer(sectionData.biomes());
             try {
-                // recreate section using PalettedContainerFactory
-                PalettedContainerFactory factory = PalettedContainerFactory.create(level.registryAccess());
-                LevelChunkSection section = new LevelChunkSection(factory);
+                // 1.21.1 has no PalettedContainerFactory; the LevelChunkSection(Registry<Biome>)
+                // constructor is the equivalent, building an all-air SECTION_STATES container and a
+                // plains-default SECTION_BIOMES container that the reads below overwrite wholesale.
+                Registry<Biome> biomeRegistry = level.registryAccess().registryOrThrow(Registries.BIOME);
+                LevelChunkSection section = new LevelChunkSection(biomeRegistry);
                 
                 // we need to read the states and biomes back using RegistryFriendlyByteBuf for palette consistency
                 net.minecraft.network.RegistryFriendlyByteBuf statesBuf = new net.minecraft.network.RegistryFriendlyByteBuf(

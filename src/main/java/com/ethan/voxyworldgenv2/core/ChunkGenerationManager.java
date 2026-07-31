@@ -3,7 +3,6 @@ package com.ethan.voxyworldgenv2.core;
 import com.ethan.voxyworldgenv2.VoxyWorldGenV2;
 import com.ethan.voxyworldgenv2.integration.VoxyIntegration;
 import com.ethan.voxyworldgenv2.integration.tellus.TellusIntegration;
-import com.ethan.voxyworldgenv2.mixin.MinecraftServerAccess;
 
 import com.ethan.voxyworldgenv2.mixin.ServerChunkCacheMixin;
 import com.ethan.voxyworldgenv2.stats.GenerationStats;
@@ -494,10 +493,13 @@ public final class ChunkGenerationManager {
         java.util.Set<ServerLevel> modifiedLevels = new java.util.HashSet<>();
         while ((op = pendingTicketOps.poll()) != null) {
             ServerChunkCache cache = op.level().getChunkSource();
+            // 1.21.1 ticket API: radius maps 1:1 onto the newer addTicketWithRadius (both derive the
+            // level as ChunkLevel.byStatus(FULL) - radius). The trailing value is part of Ticket
+            // equality, so add and remove must pass the same ChunkPos or the removal won't match.
             if (op.add()) {
-                cache.addTicketWithRadius(TicketType.FORCED, op.pos(), 0);
+                cache.addRegionTicket(TicketType.FORCED, op.pos(), 0, op.pos());
             } else {
-                cache.removeTicketWithRadius(TicketType.FORCED, op.pos(), 0);
+                cache.removeRegionTicket(TicketType.FORCED, op.pos(), 0, op.pos());
             }
             modifiedLevels.add(op.level());
         }
@@ -516,7 +518,10 @@ public final class ChunkGenerationManager {
     
     private void cleanupTask(ServerLevel level, ChunkPos pos) {
         queueTicketRemove(level, pos);
-        ((MinecraftServerAccess) server).setEmptyTicks(0);
+        // Upstream resets MinecraftServer.emptyTicks here to keep an empty server from idling while
+        // background generation runs. That field does not exist in 1.21.1 (no empty-tick auto-pause
+        // counter exists on MinecraftServer, IntegratedServer or DedicatedServer), so there is
+        // nothing to reset and the omission is behaviourally inert on this version.
         DimensionState state = dimensionStates.get(level.dimension());
         if (state != null) completeTask(state, pos);
     }
