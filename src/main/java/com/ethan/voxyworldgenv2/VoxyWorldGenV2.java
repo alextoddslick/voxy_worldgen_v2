@@ -34,5 +34,11 @@ public class VoxyWorldGenV2 implements ModInitializer {
 
         // sync LOD data when a completed chunk loads into memory (issue #50)
         ServerChunkEvents.CHUNK_LOAD.register(ServerEventHandler::onChunkLoad);
+
+        // operator commands - the only way to tune a dedicated server without a restart,
+        // since the ModMenu config screen is client-side only
+        net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback.EVENT.register(
+            (dispatcher, registryAccess, environment) ->
+                com.ethan.voxyworldgenv2.command.VoxyGenCommand.register(dispatcher));
     }
 }

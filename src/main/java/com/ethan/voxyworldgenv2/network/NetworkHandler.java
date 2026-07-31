@@ -27,8 +27,11 @@ public class NetworkHandler {
     public static final ResourceLocation HANDSHAKE_ID = ResourceLocation.parse(VoxyWorldGenV2.MOD_ID + ":handshake");
     public static final ResourceLocation LOD_DATA_ID = ResourceLocation.parse(VoxyWorldGenV2.MOD_ID + ":lod_data");
 
-    // keep individual packets well under Netty's 2MB limit to prevent connection resets on public servers
-    private static final int MAX_PACKET_BYTES = 32_768;
+    // Keep individual packets well under the protocol ceiling to prevent connection resets on
+    // public servers. The binding limit for a clientbound custom payload in 1.21.1 is
+    // ClientboundCustomPayloadPacket.MAX_PAYLOAD_SIZE = 1 MiB (the 2 MiB figure is the frame
+    // length cap, which is a separate, larger limit) -- so this leaves 32x headroom.
+    static final int MAX_PACKET_BYTES = 32_768;
 
     public record HandshakePayload(boolean serverHasMod) implements CustomPacketPayload {
         public static final Type<HandshakePayload> TYPE = new Type<>(HANDSHAKE_ID);
@@ -118,11 +121,13 @@ public class NetworkHandler {
     public static void broadcastLODData(LevelChunk chunk) {
         ChunkPos pos = chunk.getPos();
         int minY = chunk.getMinSection();
-        List<LODDataPayload.SectionData> sections = buildSections(chunk);
+        List<LodSendQueue.PendingSection> sections = snapshotSections(chunk);
 
         if (sections.isEmpty()) return;
 
         double maxDistSq = 4096.0 * 4096.0;
+        var registryAccess = chunk.getLevel().registryAccess();
+        var dimension = chunk.getLevel().dimension();
 
         for (ServerPlayer player : PlayerTracker.getInstance().getPlayers()) {
             double dx = player.getX() - (pos.getMiddleBlockX());
@@ -133,49 +138,58 @@ public class NetworkHandler {
                 continue;
             }
 
-            sendSectionsInBatches(player, chunk.getLevel().dimension(), pos, minY, sections);
+            LodSendQueue.getInstance().enqueue(player, dimension, pos, minY, sections, registryAccess);
         }
     }
 
     public static void sendLODData(ServerPlayer player, LevelChunk chunk) {
         ChunkPos pos = chunk.getPos();
         int minY = chunk.getMinSection();
-        List<LODDataPayload.SectionData> sections = buildSections(chunk);
+        List<LodSendQueue.PendingSection> sections = snapshotSections(chunk);
 
         if (sections.isEmpty()) {
             setSyncedState(player, pos, false);
             return;
         }
 
-        sendSectionsInBatches(player, chunk.getLevel().dimension(), pos, minY, sections);
+        LodSendQueue.getInstance().enqueue(player, chunk.getLevel().dimension(), pos, minY,
+            sections, chunk.getLevel().registryAccess());
         setSyncedState(player, pos, true);
     }
 
-    private static List<LODDataPayload.SectionData> buildSections(LevelChunk chunk) {
+    /**
+     * Main-thread half of the send path: take a private snapshot of everything the sender thread
+     * will need, and nothing more.
+     *
+     * <p>Block states are {@code copy()}d rather than serialised here. The copy is a long[] clone,
+     * whereas serialisation varint-encodes 4096 entries per section — moving that encoding to the
+     * sender thread is the entire point. The copy is required because a live container is guarded
+     * by a {@code ThreadingDetector} and may be mutated by this thread while the sender reads it.
+     *
+     * <p>Biomes and light stay inline: {@code getBiomes()} returns the read-only interface with no
+     * {@code copy()}, and at 64 entries against block states' 4096 it is not worth depending on the
+     * concrete type to move. Light layers must be read on the main thread regardless.
+     */
+    private static List<LodSendQueue.PendingSection> snapshotSections(LevelChunk chunk) {
         ChunkPos pos = chunk.getPos();
         int minY = chunk.getMinSection();
-        List<LODDataPayload.SectionData> sections = new ArrayList<>();
+        List<LodSendQueue.PendingSection> sections = new ArrayList<>();
         var lightEngine = chunk.getLevel().getLightEngine();
+        var registryAccess = chunk.getLevel().registryAccess();
 
         for (int i = 0; i < chunk.getSections().length; i++) {
             LevelChunkSection section = chunk.getSections()[i];
             if (section == null || section.hasOnlyAir()) continue;
 
-            io.netty.buffer.ByteBuf statesRaw = io.netty.buffer.Unpooled.buffer();
+            byte[] biomes;
             io.netty.buffer.ByteBuf biomesRaw = io.netty.buffer.Unpooled.buffer();
-            byte[] states, biomes;
             try {
-                RegistryFriendlyByteBuf statesBuf = new RegistryFriendlyByteBuf(new FriendlyByteBuf(statesRaw), chunk.getLevel().registryAccess());
-                section.getStates().write(statesBuf);
-                states = new byte[statesBuf.readableBytes()];
-                statesBuf.readBytes(states);
-
-                RegistryFriendlyByteBuf biomesBuf = new RegistryFriendlyByteBuf(new FriendlyByteBuf(biomesRaw), chunk.getLevel().registryAccess());
+                RegistryFriendlyByteBuf biomesBuf =
+                    new RegistryFriendlyByteBuf(new FriendlyByteBuf(biomesRaw), registryAccess);
                 section.getBiomes().write(biomesBuf);
                 biomes = new byte[biomesBuf.readableBytes()];
                 biomesBuf.readBytes(biomes);
             } finally {
-                statesRaw.release();
                 biomesRaw.release();
             }
 
@@ -183,9 +197,9 @@ public class NetworkHandler {
             DataLayer bl = lightEngine.getLayerListener(LightLayer.BLOCK).getDataLayerData(sectionPos);
             DataLayer sl = lightEngine.getLayerListener(LightLayer.SKY).getDataLayerData(sectionPos);
 
-            sections.add(new LODDataPayload.SectionData(
+            sections.add(new LodSendQueue.PendingSection(
                 minY + i,
-                states,
+                section.getStates().copy(),
                 biomes,
                 bl != null ? bl.getData().clone() : null,
                 sl != null ? sl.getData().clone() : null
@@ -193,30 +207,6 @@ public class NetworkHandler {
         }
 
         return sections;
-    }
-
-    private static void sendSectionsInBatches(ServerPlayer player, ResourceKey<Level> dimension, ChunkPos pos, int minY, List<LODDataPayload.SectionData> sections) {
-        List<LODDataPayload.SectionData> batch = new ArrayList<>();
-        int batchBytes = 0;
-
-        for (LODDataPayload.SectionData sd : sections) {
-            int sectionBytes = sd.states().length + sd.biomes().length
-                + (sd.blockLight() != null ? sd.blockLight().length : 0)
-                + (sd.skyLight() != null ? sd.skyLight().length : 0);
-
-            if (!batch.isEmpty() && batchBytes + sectionBytes > MAX_PACKET_BYTES) {
-                ServerPlayNetworking.send(player, new LODDataPayload(dimension, pos, minY, batch));
-                batch = new ArrayList<>();
-                batchBytes = 0;
-            }
-
-            batch.add(sd);
-            batchBytes += sectionBytes;
-        }
-
-        if (!batch.isEmpty()) {
-            ServerPlayNetworking.send(player, new LODDataPayload(dimension, pos, minY, batch));
-        }
     }
 
     public static void sendHandshake(ServerPlayer player) {
