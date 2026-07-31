@@ -1,6 +1,8 @@
 package com.ethan.voxyworldgenv2.integration;
 
 import com.ethan.voxyworldgenv2.VoxyWorldGenV2;
+import net.fabricmc.api.EnvType;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.world.level.chunk.LevelChunk;
 
 import java.lang.invoke.MethodHandle;
@@ -79,14 +81,23 @@ public final class VoxyIntegration {
                 worldIdentifierOfMethod = lookup.unreflect(ofMethod);
             } catch (NoSuchMethodException ignored) {}
 
-            // find voxy enabled/active state accessor
-            try {
-                resolveEnabledAccessor(lookup, Class.forName("me.cortex.voxy.client.config.VoxyConfig"));
-            } catch (ClassNotFoundException ignored) {
-                // try alternate class names
+            // Find voxy's rendering-state accessor, but only on a physical client.
+            //
+            // Voxy is environment "*", so its classes are present on a dedicated server, but
+            // isRenderingEnabled() is isAvailable() && enabled && enableRendering and isAvailable()
+            // requires a client render factory. On a dedicated server it is therefore permanently
+            // false, and gating on it would suppress background generation outright -- which would
+            // break this mod's server-side support. Whether a remote client is rendering Voxy is not
+            // something the server can or should answer, so it does not ask.
+            if (FabricLoader.getInstance().getEnvironmentType() == EnvType.CLIENT) {
                 try {
-                    resolveEnabledAccessor(lookup, Class.forName("me.cortex.voxy.client.VoxyClient"));
-                } catch (ClassNotFoundException ignored3) {}
+                    resolveEnabledAccessor(lookup, Class.forName("me.cortex.voxy.client.config.VoxyConfig"));
+                } catch (ClassNotFoundException ignored) {
+                    // try alternate class names
+                    try {
+                        resolveEnabledAccessor(lookup, Class.forName("me.cortex.voxy.client.VoxyClient"));
+                    } catch (ClassNotFoundException ignored3) {}
+                }
             }
 
             VoxyWorldGenV2.LOGGER.info("voxy integration initialized (enabled: {}, raw: {}, voxyEnabled: {})", enabled, rawIngestMethod != null, hasEnabledAccessor());
