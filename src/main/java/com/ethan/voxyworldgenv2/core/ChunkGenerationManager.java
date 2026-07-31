@@ -62,6 +62,7 @@ public final class ChunkGenerationManager {
     private final GenerationStats stats = new GenerationStats();
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean configReloadScheduled = new AtomicBoolean(false);
+    private int playerReconcileTicks = 0;
     
     // components
     private final TpsMonitor tpsMonitor = new TpsMonitor();
@@ -105,6 +106,7 @@ public final class ChunkGenerationManager {
         this.pauseCheck = () -> false; 
         Config.load();
         this.throttle = new Semaphore(Config.DATA.maxActiveTasks);
+        com.ethan.voxyworldgenv2.network.LodSendQueue.getInstance().start();
         startWorker();
         VoxyWorldGenV2.LOGGER.info("voxy world gen initialized");
     }
@@ -112,6 +114,7 @@ public final class ChunkGenerationManager {
     public void shutdown() {
         running.set(false);
         stopWorker();
+        com.ethan.voxyworldgenv2.network.LodSendQueue.getInstance().shutdown();
         TellusIntegration.shutdown();
         
         for (var entry : dimensionStates.entrySet()) {
@@ -358,7 +361,18 @@ public final class ChunkGenerationManager {
         if (!running.get() || server == null) return;
         
         processPendingTickets();
-        
+
+        // Once a second, reconcile the player tracker against the server's own list. The
+        // disconnect event cannot be relied on to fire (see PlayerTracker.reconcile), and a stale
+        // entry means the worker never idles.
+        if (++playerReconcileTicks >= 20) {
+            playerReconcileTicks = 0;
+            int dropped = PlayerTracker.getInstance().reconcile(server);
+            if (dropped > 0) {
+                VoxyWorldGenV2.LOGGER.debug("pruned {} stale tracked player(s)", dropped);
+            }
+        }
+
         if (configReloadScheduled.compareAndSet(true, false)) {
             Config.load();
             updateThrottleCapacity();
