@@ -15,7 +15,15 @@ public final class VoxyIntegration {
     private static MethodHandle ingestMethod;
     private static MethodHandle rawIngestMethod;
     private static MethodHandle worldIdentifierOfMethod;
-    private static MethodHandle voxyEnabledMethod;
+
+    // Voxy's rendering-enabled state. Either a no-arg accessor (static method or static field), or
+    // an instance accessor plus a getter for the singleton that holds it. The singleton is read
+    // fresh on every query rather than bound once at init: Voxy's VoxyConfig.CONFIG is a non-final
+    // static that gets reassigned when the config is reloaded, so a bound handle would pin a stale
+    // instance and silently report the old state forever.
+    private static MethodHandle voxyEnabledStaticHandle;
+    private static MethodHandle voxyEnabledInstanceHandle;
+    private static MethodHandle voxyConfigSingletonGetter;
 
     private VoxyIntegration() {}
 
@@ -71,32 +79,17 @@ public final class VoxyIntegration {
                 worldIdentifierOfMethod = lookup.unreflect(ofMethod);
             } catch (NoSuchMethodException ignored) {}
 
-            // find voxy enabled/active state method
+            // find voxy enabled/active state accessor
             try {
-                Class<?> voxyConfigClass = Class.forName("me.cortex.voxy.client.config.VoxyConfig");
-                try {
-                    Method isEnabledMethod = voxyConfigClass.getMethod("isEnabled");
-                    voxyEnabledMethod = lookup.unreflect(isEnabledMethod);
-                } catch (NoSuchMethodException ignored) {
-                    // try field-based approach
-                    try {
-                        Field enabledField = voxyConfigClass.getDeclaredField("enabled");
-                        enabledField.setAccessible(true);
-                        voxyEnabledMethod = lookup.unreflectGetter(enabledField);
-                    } catch (Exception ignored2) {}
-                }
+                resolveEnabledAccessor(lookup, Class.forName("me.cortex.voxy.client.config.VoxyConfig"));
             } catch (ClassNotFoundException ignored) {
                 // try alternate class names
                 try {
-                    Class<?> voxyClientClass = Class.forName("me.cortex.voxy.client.VoxyClient");
-                    try {
-                        Method isEnabledMethod = voxyClientClass.getMethod("isEnabled");
-                        voxyEnabledMethod = lookup.unreflect(isEnabledMethod);
-                    } catch (NoSuchMethodException ignored2) {}
+                    resolveEnabledAccessor(lookup, Class.forName("me.cortex.voxy.client.VoxyClient"));
                 } catch (ClassNotFoundException ignored3) {}
             }
 
-            VoxyWorldGenV2.LOGGER.info("voxy integration initialized (enabled: {}, raw: {}, voxyEnabled: {})", enabled, rawIngestMethod != null, voxyEnabledMethod != null);
+            VoxyWorldGenV2.LOGGER.info("voxy integration initialized (enabled: {}, raw: {}, voxyEnabled: {})", enabled, rawIngestMethod != null, hasEnabledAccessor());
 
         } catch (ClassNotFoundException e) {
             VoxyWorldGenV2.LOGGER.info("voxy not present, integration disabled");
@@ -105,6 +98,79 @@ public final class VoxyIntegration {
             VoxyWorldGenV2.LOGGER.error("failed to initialize voxy integration", e);
             enabled = false;
         }
+    }
+
+    /**
+     * Resolves Voxy's rendering-enabled state accessor on {@code owner}, preferring the most
+     * complete signal available.
+     *
+     * <p>{@code isRenderingEnabled()} is checked first because it is the accessor that actually
+     * answers this question — in Voxy it returns {@code isAvailable() && enabled && enableRendering},
+     * whereas the raw {@code enabled} field is only one of those three terms. The others are
+     * fallbacks for Voxy versions that expose a different shape.
+     *
+     * <p>Static and instance members are handled separately. An instance accessor is only usable if
+     * the singleton holding it can also be located, so it is discarded otherwise rather than left
+     * dangling — invoking an instance handle with no receiver throws.
+     */
+    private static void resolveEnabledAccessor(MethodHandles.Lookup lookup, Class<?> owner) {
+        for (String name : new String[]{"isRenderingEnabled", "isEnabled"}) {
+            try {
+                Method m = owner.getMethod(name);
+                if (m.getReturnType() != boolean.class && m.getReturnType() != Boolean.class) continue;
+                if (Modifier.isStatic(m.getModifiers())) {
+                    voxyEnabledStaticHandle = lookup.unreflect(m);
+                    return;
+                }
+                voxyEnabledInstanceHandle = lookup.unreflect(m);
+                break;
+            } catch (NoSuchMethodException ignored) {
+            } catch (Exception e) {
+                VoxyWorldGenV2.LOGGER.debug("could not unreflect voxy accessor {}", name, e);
+            }
+        }
+
+        if (voxyEnabledInstanceHandle == null) {
+            try {
+                Field enabledField = owner.getDeclaredField("enabled");
+                enabledField.setAccessible(true);
+                if (Modifier.isStatic(enabledField.getModifiers())) {
+                    voxyEnabledStaticHandle = lookup.unreflectGetter(enabledField);
+                    return;
+                }
+                voxyEnabledInstanceHandle = lookup.unreflectGetter(enabledField);
+            } catch (Exception ignored) {
+                return;
+            }
+        }
+
+        voxyConfigSingletonGetter = resolveSingletonGetter(lookup, owner);
+        if (voxyConfigSingletonGetter == null) {
+            // no receiver available, so the instance handle is unusable
+            voxyEnabledInstanceHandle = null;
+        }
+    }
+
+    /** Finds a static field on {@code owner} holding an instance of {@code owner} itself. */
+    private static MethodHandle resolveSingletonGetter(MethodHandles.Lookup lookup, Class<?> owner) {
+        for (String name : new String[]{"CONFIG", "INSTANCE"}) {
+            try {
+                Field f = owner.getDeclaredField(name);
+                if (!Modifier.isStatic(f.getModifiers())) continue;
+                if (!owner.isAssignableFrom(f.getType())) continue;
+                f.setAccessible(true);
+                return lookup.unreflectGetter(f);
+            } catch (NoSuchFieldException ignored) {
+            } catch (Exception e) {
+                VoxyWorldGenV2.LOGGER.debug("could not unreflect voxy singleton {}", name, e);
+            }
+        }
+        return null;
+    }
+
+    private static boolean hasEnabledAccessor() {
+        return voxyEnabledStaticHandle != null
+            || (voxyEnabledInstanceHandle != null && voxyConfigSingletonGetter != null);
     }
 
     public static void ingestChunk(LevelChunk chunk) {
@@ -169,11 +235,20 @@ public final class VoxyIntegration {
     public static boolean isVoxyRenderingEnabled() {
         if (!initialized) initialize();
         if (!enabled) return true; // voxy not present, don't suppress generation
-        if (voxyEnabledMethod == null) return true; // can't determine state, assume enabled
         try {
-            Object result = voxyEnabledMethod.invoke();
-            if (result instanceof Boolean b) return b;
-        } catch (Throwable ignored) {}
-        return true;
+            if (voxyEnabledStaticHandle != null) {
+                Object result = voxyEnabledStaticHandle.invoke();
+                if (result instanceof Boolean b) return b;
+            } else if (voxyEnabledInstanceHandle != null && voxyConfigSingletonGetter != null) {
+                Object config = voxyConfigSingletonGetter.invoke();
+                if (config != null) {
+                    Object result = voxyEnabledInstanceHandle.invoke(config);
+                    if (result instanceof Boolean b) return b;
+                }
+            }
+        } catch (Throwable t) {
+            VoxyWorldGenV2.LOGGER.debug("failed to read voxy rendering state", t);
+        }
+        return true; // can't determine state, assume enabled
     }
 }
