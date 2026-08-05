@@ -51,6 +51,11 @@ public class NetworkHandler {
         }
     }
 
+    /** Raw (pre-compression) section bytes written; server-side only. */
+    public static final java.util.concurrent.atomic.AtomicLong RAW_SECTION_BYTES = new java.util.concurrent.atomic.AtomicLong();
+    /** Deflated section bytes actually put on the wire; server-side only. */
+    public static final java.util.concurrent.atomic.AtomicLong WIRE_SECTION_BYTES = new java.util.concurrent.atomic.AtomicLong();
+
     public record LODDataPayload(ResourceKey<Level> dimension, ChunkPos pos, int minY, List<SectionData> sections) implements CustomPacketPayload {
         public static final Type<LODDataPayload> TYPE = new Type<>(LOD_DATA_ID);
         public static final StreamCodec<RegistryFriendlyByteBuf, LODDataPayload> CODEC = CustomPacketPayload.codec(LODDataPayload::write, LODDataPayload::new);
@@ -80,7 +85,7 @@ public class NetworkHandler {
                 ResourceKey.create(Registries.DIMENSION, Identifier.parse(buf.readUtf())),
                 buf.readChunkPos(),
                 buf.readInt(),
-                buf.readCollection(ArrayList::new, b -> SectionData.read((RegistryFriendlyByteBuf) b))
+                readCompressedSections(buf)
             );
         }
 
@@ -88,8 +93,78 @@ public class NetworkHandler {
             buf.writeUtf(dimension.identifier().toString());
             buf.writeChunkPos(pos);
             buf.writeInt(minY);
-            // cast to avoid ambiguous writeCollection / BiConsumer type issues
-            buf.writeCollection(sections, (b, s) -> s.write((RegistryFriendlyByteBuf) b));
+            writeCompressedSections(buf, sections);
+        }
+
+        /**
+         * The section block is deflated as one unit. Terrain data is highly repetitive
+         * (palettes, runs of the same state, near-identical light arrays), so a whole-batch
+         * zlib window typically shrinks it 3-6x — far better than the connection's per-packet
+         * compression alone manages, and measured explicitly via RAW/WIRE_SECTION_BYTES.
+         */
+        private static void writeCompressedSections(RegistryFriendlyByteBuf buf, List<SectionData> sections) {
+            io.netty.buffer.ByteBuf raw = io.netty.buffer.Unpooled.buffer();
+            try {
+                RegistryFriendlyByteBuf inner = new RegistryFriendlyByteBuf(new FriendlyByteBuf(raw), buf.registryAccess());
+                inner.writeCollection(sections, (b, s) -> s.write((RegistryFriendlyByteBuf) b));
+                byte[] plain = new byte[inner.readableBytes()];
+                inner.readBytes(plain);
+
+                java.util.zip.Deflater deflater = new java.util.zip.Deflater(java.util.zip.Deflater.DEFAULT_COMPRESSION);
+                byte[] out = new byte[plain.length + 64];
+                int packed;
+                try {
+                    deflater.setInput(plain);
+                    deflater.finish();
+                    packed = deflater.deflate(out);
+                    // Incompressible data can exceed the buffer; fall back to stored bytes.
+                    if (!deflater.finished()) packed = 0;
+                } finally {
+                    deflater.end();
+                }
+
+                buf.writeVarInt(plain.length);
+                if (packed > 0 && packed < plain.length) {
+                    buf.writeByteArray(java.util.Arrays.copyOf(out, packed));
+                    WIRE_SECTION_BYTES.addAndGet(packed);
+                } else {
+                    buf.writeByteArray(plain);
+                    WIRE_SECTION_BYTES.addAndGet(plain.length);
+                }
+                RAW_SECTION_BYTES.addAndGet(plain.length);
+            } finally {
+                raw.release();
+            }
+        }
+
+        private static List<SectionData> readCompressedSections(RegistryFriendlyByteBuf buf) {
+            int plainLength = buf.readVarInt();
+            byte[] body = buf.readByteArray();
+
+            byte[] plain;
+            if (body.length == plainLength) {
+                plain = body; // stored uncompressed (incompressible fallback)
+            } else {
+                plain = new byte[plainLength];
+                java.util.zip.Inflater inflater = new java.util.zip.Inflater();
+                try {
+                    inflater.setInput(body);
+                    int n = inflater.inflate(plain);
+                    if (n != plainLength) throw new java.util.zip.DataFormatException("short inflate: " + n + " != " + plainLength);
+                } catch (java.util.zip.DataFormatException e) {
+                    throw new io.netty.handler.codec.DecoderException("bad LOD section data", e);
+                } finally {
+                    inflater.end();
+                }
+            }
+
+            io.netty.buffer.ByteBuf raw = io.netty.buffer.Unpooled.wrappedBuffer(plain);
+            try {
+                RegistryFriendlyByteBuf inner = new RegistryFriendlyByteBuf(new FriendlyByteBuf(raw), buf.registryAccess());
+                return inner.readCollection(ArrayList::new, b -> SectionData.read((RegistryFriendlyByteBuf) b));
+            } finally {
+                raw.release();
+            }
         }
 
         @Override
@@ -138,7 +213,11 @@ public class NetworkHandler {
                 continue;
             }
 
-            LodSendQueue.getInstance().enqueue(player, dimension, pos, minY, sections, registryAccess);
+            boolean accepted = LodSendQueue.getInstance().enqueue(
+                player, dimension, pos, minY, sections, registryAccess);
+            // Mirror the enqueue result into the synced set: accepted chunks won't be re-sent by
+            // the catch-up path, dropped ones will be.
+            setSyncedState(player, pos, accepted);
         }
     }
 
@@ -152,9 +231,9 @@ public class NetworkHandler {
             return;
         }
 
-        LodSendQueue.getInstance().enqueue(player, chunk.getLevel().dimension(), pos, minY,
-            sections, chunk.getLevel().registryAccess());
-        setSyncedState(player, pos, true);
+        boolean accepted = LodSendQueue.getInstance().enqueue(player, chunk.getLevel().dimension(),
+            pos, minY, sections, chunk.getLevel().registryAccess());
+        setSyncedState(player, pos, accepted);
     }
 
     /**
