@@ -4,6 +4,7 @@ import com.ethan.voxyworldgenv2.core.ChunkGenerationManager;
 import com.ethan.voxyworldgenv2.core.Config;
 import com.ethan.voxyworldgenv2.core.PlayerTracker;
 import com.ethan.voxyworldgenv2.network.LodSendQueue;
+import com.ethan.voxyworldgenv2.network.NetworkHandler;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.arguments.DoubleArgumentType;
@@ -14,6 +15,7 @@ import com.mojang.brigadier.context.CommandContext;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerPlayer;
 
 /**
  * Server-side operator commands.
@@ -41,6 +43,10 @@ public final class VoxyGenCommand {
         root.then(buildQueue());
         root.then(buildEnabled());
         root.then(buildRateLimit());
+        root.then(buildLogInterval());
+        root.then(buildSettings());
+        root.then(buildHeadless());
+        root.then(buildLog());
         root.then(buildTraffic());
         root.then(buildReload());
         root.executes(VoxyGenCommand::status);
@@ -90,6 +96,29 @@ public final class VoxyGenCommand {
                 .executes(ctx -> applyRateLimit(ctx, DoubleArgumentType.getDouble(ctx, "mbps"))));
     }
 
+    private static ArgumentBuilder<CommandSourceStack, ?> buildLogInterval() {
+        return Commands.literal("loginterval")
+            .executes(ctx -> report(ctx, "logProgressIntervalSeconds", Config.DATA.logProgressIntervalSeconds))
+            .then(Commands.literal("off").executes(ctx -> applyLogInterval(ctx, 0)))
+            .then(Commands.argument("seconds", IntegerArgumentType.integer(0, 3600))
+                .executes(ctx -> applyLogInterval(ctx, IntegerArgumentType.getInteger(ctx, "seconds"))));
+    }
+
+    private static ArgumentBuilder<CommandSourceStack, ?> buildSettings() {
+        return Commands.literal("settings").executes(VoxyGenCommand::settings);
+    }
+
+    private static ArgumentBuilder<CommandSourceStack, ?> buildHeadless() {
+        return Commands.literal("headless")
+            .executes(VoxyGenCommand::showHeadless)
+            .then(Commands.argument("value", BoolArgumentType.bool())
+                .executes(VoxyGenCommand::setHeadless));
+    }
+
+    private static ArgumentBuilder<CommandSourceStack, ?> buildLog() {
+        return Commands.literal("log").executes(VoxyGenCommand::toggleLog);
+    }
+
     private static ArgumentBuilder<CommandSourceStack, ?> buildTraffic() {
         return Commands.literal("traffic").executes(VoxyGenCommand::traffic);
     }
@@ -133,6 +162,7 @@ public final class VoxyGenCommand {
         if (v > 128) {
             reply(ctx, "§e warning:§r a large radius streams a lot of data; watch egress on hosted servers");
         }
+        maybeShowBook(ctx);
         return 1;
     }
 
@@ -142,6 +172,7 @@ public final class VoxyGenCommand {
         Config.DATA.maxActiveTasks = v;
         persist();
         reply(ctx, String.format("maxActiveTasks %d -> §a%d§r", old, v));
+        maybeShowBook(ctx);
         return 1;
     }
 
@@ -151,6 +182,7 @@ public final class VoxyGenCommand {
         Config.DATA.maxQueueSize = v;
         persist();
         reply(ctx, String.format("maxQueueSize %d -> §a%d§r", old, v));
+        maybeShowBook(ctx);
         return 1;
     }
 
@@ -159,6 +191,7 @@ public final class VoxyGenCommand {
         Config.DATA.enabled = v;
         persist();
         reply(ctx, v ? "generation §aenabled§r" : "generation §cdisabled§r");
+        maybeShowBook(ctx);
         return 1;
     }
 
@@ -182,6 +215,7 @@ public final class VoxyGenCommand {
                 old <= 0 ? "unlimited" : String.format("%.2f Mbps", old), mbps,
                 humanBytes((long) (mbps * 125_000))));
         }
+        maybeShowBook(ctx);
         return 1;
     }
 
@@ -190,10 +224,17 @@ public final class VoxyGenCommand {
         long bps = q.getCurrentBytesPerSecond();
 
         reply(ctx, "§6LOD traffic§r");
-        reply(ctx, String.format("  total sent : §b%s§r over %d packets",
-            humanBytes(q.getBytesSent()), q.getPacketsSent()));
-        reply(ctx, String.format("  now        : §b%s/s§r  (%.2f Mbps)",
-            humanBytes(bps), (bps * 8.0) / 1_000_000.0));
+        long raw = NetworkHandler.RAW_SECTION_BYTES.get();
+        long wire = NetworkHandler.WIRE_SECTION_BYTES.get();
+        if (wire > 0) {
+            reply(ctx, String.format("  on the wire: §b%s§r over %d packets  (was %s raw, §a%.1fx§r smaller)",
+                humanBytes(wire), q.getPacketsSent(), humanBytes(raw), raw > 0 ? (double) raw / wire : 0.0));
+        } else {
+            reply(ctx, String.format("  total sent : §b%s§r over %d packets",
+                humanBytes(q.getBytesSent()), q.getPacketsSent()));
+        }
+        reply(ctx, String.format("  now        : §b%.2f MB/s§r raw before compression  (%.2f Mbps)",
+            bps / 1_000_000.0, (bps * 8.0) / 1_000_000.0));
         reply(ctx, String.format("  limit      : %s",
             Config.DATA.maxMbpsPerPlayer <= 0 ? "§eunlimited§r"
                 : String.format("§b%.2f Mbps§r per player", Config.DATA.maxMbpsPerPlayer)));
@@ -222,6 +263,87 @@ public final class VoxyGenCommand {
     private static int reload(CommandContext<CommandSourceStack> ctx) {
         ChunkGenerationManager.getInstance().scheduleConfigReload();
         reply(ctx, "config reload scheduled (re-reads config/voxyworldgenv2.json next tick)");
+        return 1;
+    }
+
+    private static int applyLogInterval(CommandContext<CommandSourceStack> ctx, int seconds) {
+        int old = Config.DATA.logProgressIntervalSeconds;
+        Config.DATA.logProgressIntervalSeconds = seconds;
+        persist();
+        reply(ctx, String.format("progress log interval %s -> %s",
+            old <= 0 ? "off" : old + "s", seconds <= 0 ? "§eoff§r" : "§a" + seconds + "s§r"));
+        maybeShowBook(ctx);
+        return 1;
+    }
+
+    private static int settings(CommandContext<CommandSourceStack> ctx) {
+        if (ctx.getSource().getEntity() instanceof ServerPlayer player) {
+            SettingsBook.open(player);
+        } else {
+            // console/RCON has no screen; print the same information as text
+            status(ctx);
+        }
+        return 1;
+    }
+
+    /**
+     * In-game sources get the settings book re-opened so the change is visible immediately —
+     * unless the player opted out with {@code /voxygen headless on}.
+     */
+    private static void maybeShowBook(CommandContext<CommandSourceStack> ctx) {
+        if (ctx.getSource().getEntity() instanceof ServerPlayer player && !isHeadless(player)) {
+            SettingsBook.open(player);
+        }
+    }
+
+    static boolean isHeadless(ServerPlayer player) {
+        return Config.DATA.headlessPlayers.contains(player.getUUID().toString());
+    }
+
+    private static int toggleLog(CommandContext<CommandSourceStack> ctx) {
+        if (!(ctx.getSource().getEntity() instanceof ServerPlayer player)) {
+            reply(ctx, "the tab HUD is per-player; run this in game");
+            return 0;
+        }
+        boolean on = TabHud.toggle(player);
+        reply(ctx, on
+            ? "tab HUD \u00a7aon\u00a7r - hold Tab to see live worldgen info (/voxygen log to hide)"
+            : "tab HUD \u00a7coff\u00a7r");
+        return 1;
+    }
+
+    private static int showHeadless(CommandContext<CommandSourceStack> ctx) {
+        if (ctx.getSource().getEntity() instanceof ServerPlayer player) {
+            reply(ctx, isHeadless(player)
+                ? "headless: §aon§r - settings book only opens via /voxygen settings"
+                : "headless: §coff§r - settings book auto-opens after changes");
+        } else {
+            reply(ctx, "headless is a per-player preference; consoles are always headless");
+        }
+        return 1;
+    }
+
+    private static int setHeadless(CommandContext<CommandSourceStack> ctx) {
+        if (!(ctx.getSource().getEntity() instanceof ServerPlayer player)) {
+            reply(ctx, "headless is a per-player preference; run this in game");
+            return 0;
+        }
+        boolean v = BoolArgumentType.getBool(ctx, "value");
+        String id = player.getUUID().toString();
+        if (v && !Config.DATA.headlessPlayers.contains(id)) {
+            Config.DATA.headlessPlayers.add(id);
+        } else if (!v) {
+            Config.DATA.headlessPlayers.remove(id);
+        }
+        Config.save();
+        reply(ctx, v
+            ? "headless §aon§r - the book won't auto-open; /voxygen settings still shows it"
+            : "headless §coff§r - the book auto-opens after setting changes");
+        // Deliberately no book popup here: turning headless ON and getting a book in the face
+        // would be exactly the annoyance being opted out of. Turning it off shows it again.
+        if (!v) {
+            SettingsBook.open(player);
+        }
         return 1;
     }
 
