@@ -37,8 +37,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * are already plain array clones.
  *
  * <p>The queue is bounded and <b>never blocks the main thread</b>: if the sender falls behind, jobs
- * are dropped and counted rather than stalling the tick loop. Dropping LOD data is cosmetic and
- * self-healing — the chunk re-syncs on the next load — whereas blocking the server is not.
+ * are dropped and counted rather than stalling the tick loop. A drop is recoverable only because
+ * {@link #enqueue} reports it and callers leave the chunk unsynced, so the worker's catch-up path
+ * re-sends it later. The generation worker also applies backpressure (pausing dispatch while this
+ * queue is nearly full), so sustained drops should not happen in practice.
  */
 public final class LodSendQueue {
     private static final LodSendQueue INSTANCE = new LodSendQueue();
@@ -128,19 +130,25 @@ public final class LodSendQueue {
 
     /**
      * Enqueue from the main thread. Returns immediately; never blocks.
+     *
+     * @return true if the job was accepted; false if it was dropped because the queue is full (or
+     *         the sender is not running). Callers must treat false as "not sent" and leave the
+     *         chunk marked unsynced so the catch-up path retries it.
      */
-    public void enqueue(ServerPlayer player, ResourceKey<Level> dimension, ChunkPos pos,
-                        int minY, List<PendingSection> sections, RegistryAccess registryAccess) {
-        if (!running.get() || sections.isEmpty()) return;
-        if (!queue.offer(new Job(player, dimension, pos, minY, sections, registryAccess))) {
-            int n = jobsDropped.incrementAndGet();
-            // Log sparsely: a saturated queue produces a lot of these.
-            if (n == 1 || n % 500 == 0) {
-                VoxyWorldGenV2.LOGGER.warn(
-                    "LOD send queue saturated, dropped {} chunk(s). Generation is outrunning the network; "
-                    + "lower generationRadius or maxActiveTasks if this persists.", n);
-            }
+    public boolean enqueue(ServerPlayer player, ResourceKey<Level> dimension, ChunkPos pos,
+                           int minY, List<PendingSection> sections, RegistryAccess registryAccess) {
+        if (!running.get() || sections.isEmpty()) return false;
+        if (queue.offer(new Job(player, dimension, pos, minY, sections, registryAccess))) {
+            return true;
         }
+        int n = jobsDropped.incrementAndGet();
+        // Log sparsely: a saturated queue produces a lot of these.
+        if (n == 1 || n % 500 == 0) {
+            VoxyWorldGenV2.LOGGER.warn(
+                "LOD send queue saturated ({} deferred so far); deferred chunks re-sync automatically "
+                + "once the sender catches up.", n);
+        }
+        return false;
     }
 
     private void loop() {

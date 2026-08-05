@@ -46,6 +46,7 @@ public final class ChunkGenerationManager {
         final DistanceGraph distanceGraph = new DistanceGraph();
         final Set<Long> trackedBatches = ConcurrentHashMap.newKeySet();
         final Map<Long, AtomicInteger> batchCounters = new ConcurrentHashMap<>();
+        final Map<Long, Long> taskStartMs = new ConcurrentHashMap<>();
         final AtomicInteger remainingInRadius = new AtomicInteger(0);
         boolean tellusActive = false;
         boolean loaded = false;
@@ -71,7 +72,18 @@ public final class ChunkGenerationManager {
     private ResourceKey<Level> currentDimensionKey = null;
     private ServerLevel currentLevel = null;
     private final java.util.Map<java.util.UUID, ChunkPos> lastPlayerPositions = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Map<java.util.UUID, ResourceKey<Level>> lastPlayerLevels = new java.util.concurrent.ConcurrentHashMap<>();
     private java.util.function.BooleanSupplier pauseCheck = () -> false;
+
+    // While set in the future, the worker dispatches nothing — used to yield the chunk system
+    // to a player joining or changing dimension (see Config.dimensionChangePauseSeconds).
+    private volatile long generationPausedUntilMs = 0;
+
+    // periodic console progress logging. lastLoggedCompleted starts equal to the stats counter
+    // (0) so an idle server does not produce a spurious "generating ... 0 done" line on boot.
+    private long lastProgressLogMs = 0;
+    private long lastLoggedCompleted = 0;
+    private boolean wasGenerating = false;
 
     // worker
     private Thread workerThread;
@@ -124,6 +136,7 @@ public final class ChunkGenerationManager {
             }
         }
         
+        com.ethan.voxyworldgenv2.command.TabHud.clear();
         dimensionStates.clear();
         pendingTicketOps.clear();
         server = null;
@@ -133,6 +146,11 @@ public final class ChunkGenerationManager {
         currentDimensionKey = null;
         currentLevel = null;
         lastPlayerPositions.clear();
+        lastPlayerLevels.clear();
+        generationPausedUntilMs = 0;
+        lastProgressLogMs = 0;
+        lastLoggedCompleted = 0;
+        wasGenerating = false;
     }
 
     private void startWorker() {
@@ -171,6 +189,21 @@ public final class ChunkGenerationManager {
 
                 if (tpsMonitor.isThrottled() || pauseCheck.getAsBoolean()) {
                     Thread.sleep(500);
+                    continue;
+                }
+
+                // Yield entirely while a player is loading into a dimension (join or teleport).
+                if (System.currentTimeMillis() < generationPausedUntilMs) {
+                    Thread.sleep(250);
+                    continue;
+                }
+
+                // Backpressure: generating faster than the LOD sender can push to clients just
+                // fills its bounded queue and forces drops/retries. Pause dispatch (generation AND
+                // catch-up sync) while the queue is over 3/4 full and let the sender drain.
+                var sendQueue = com.ethan.voxyworldgenv2.network.LodSendQueue.getInstance();
+                if (sendQueue.getQueuedJobs() > sendQueue.getMaxQueuedJobs() * 3 / 4) {
+                    Thread.sleep(200);
                     continue;
                 }
                 
@@ -281,6 +314,7 @@ public final class ChunkGenerationManager {
                     
                     processedCount++;
                     if (finalState.trackedChunks.add(pos.pack())) {
+                        finalState.taskStartMs.put(pos.pack(), System.currentTimeMillis());
                         activeTaskCount.incrementAndGet();
                         stats.incrementQueued();
                         
@@ -367,6 +401,8 @@ public final class ChunkGenerationManager {
         // entry means the worker never idles.
         if (++playerReconcileTicks >= 20) {
             playerReconcileTicks = 0;
+            com.ethan.voxyworldgenv2.command.TabHud.tick(server);
+            reapStuckTasks();
             int dropped = PlayerTracker.getInstance().reconcile(server);
             if (dropped > 0) {
                 VoxyWorldGenV2.LOGGER.debug("pruned {} stale tracked player(s)", dropped);
@@ -381,6 +417,7 @@ public final class ChunkGenerationManager {
         
         tpsMonitor.tick();
         stats.tick();
+        logProgress();
         checkPlayerMovement();
         
         // broadcast changes for all active dimensions
@@ -393,11 +430,56 @@ public final class ChunkGenerationManager {
         }
     }
     
+    private void logProgress() {
+        int interval = Config.DATA.logProgressIntervalSeconds;
+        if (interval <= 0) return;
+
+        long now = System.currentTimeMillis();
+        if (now - lastProgressLogMs < interval * 1000L) return;
+        lastProgressLogMs = now;
+
+        long completed = stats.getCompleted();
+        int active = activeTaskCount.get();
+        int remaining = getRemainingInRadius();
+        boolean generating = active > 0 || completed != lastLoggedCompleted;
+
+        if (!generating) {
+            // one final line when a run finishes so the console shows it caught up
+            if (wasGenerating && remaining == 0) {
+                VoxyWorldGenV2.LOGGER.info(
+                    "generation caught up: {} chunks this session ({} skipped, {} failed)",
+                    completed, stats.getSkipped(), stats.getFailed());
+                wasGenerating = false;
+            }
+            return;
+        }
+
+        double cps = stats.getChunksPerSecond();
+        String eta = "";
+        if (cps > 0.5 && remaining > 0) {
+            long secs = (long) (remaining / cps);
+            eta = secs >= 60
+                ? String.format(" (~%dm %02ds)", secs / 60, secs % 60)
+                : String.format(" (~%ds)", secs);
+        }
+
+        String dim = currentDimensionKey != null ? currentDimensionKey.location().toString() : "?";
+        VoxyWorldGenV2.LOGGER.info(
+            "generating [{}]: {} done @ {}/s, {} remaining in radius{}, {} active, {} skipped, {} failed{}",
+            dim, completed, String.format("%.1f", cps), remaining, eta,
+            active, stats.getSkipped(), stats.getFailed(),
+            tpsMonitor.isThrottled() ? " [TPS-THROTTLED]" : (isTransitionPaused() ? " [PAUSED: player loading]" : ""));
+
+        lastLoggedCompleted = completed;
+        wasGenerating = true;
+    }
+
     private void checkPlayerMovement() {
         var players = PlayerTracker.getInstance().getPlayers();
         if (players.isEmpty()) {
             if (!lastPlayerPositions.isEmpty()) {
                 lastPlayerPositions.clear();
+                lastPlayerLevels.clear();
             }
             return;
         }
@@ -409,10 +491,18 @@ public final class ChunkGenerationManager {
             levelCounts.merge((ServerLevel) player.level(), 1, Integer::sum);
             ChunkPos currentPos = player.chunkPosition();
             ChunkPos lastPos = lastPlayerPositions.get(player.getUUID());
-            
+
             if (lastPos == null || distSq(lastPos, currentPos) >= 4) {
                 lastPlayerPositions.put(player.getUUID(), currentPos);
                 shouldRescan = true;
+            }
+
+            // A join or dimension change means the server is about to synchronously load that
+            // player's surroundings. Get out of the chunk system's way for a grace period.
+            ResourceKey<Level> currentLevelKey = player.level().dimension();
+            ResourceKey<Level> lastLevelKey = lastPlayerLevels.put(player.getUUID(), currentLevelKey);
+            if (!currentLevelKey.equals(lastLevelKey)) {
+                pauseForTransition(player.getName().getString(), currentLevelKey, lastLevelKey == null);
             }
         }
         
@@ -437,12 +527,25 @@ public final class ChunkGenerationManager {
         for (ServerPlayer p : players) currentPlayerIds.add(p.getUUID());
         if (lastPlayerPositions.size() > currentPlayerIds.size()) {
             lastPlayerPositions.keySet().removeIf(uuid -> !currentPlayerIds.contains(uuid));
+            lastPlayerLevels.keySet().removeIf(uuid -> !currentPlayerIds.contains(uuid));
             shouldRescan = true;
         }
 
         if (shouldRescan) {
             restartScan();
         }
+    }
+
+    private void pauseForTransition(String playerName, ResourceKey<Level> dim, boolean isJoin) {
+        int seconds = Config.DATA.dimensionChangePauseSeconds;
+        if (seconds <= 0) return;
+        generationPausedUntilMs = System.currentTimeMillis() + seconds * 1000L;
+        VoxyWorldGenV2.LOGGER.info("pausing generation {}s while {} loads into {} ({})",
+            seconds, playerName, dim.location(), isJoin ? "join" : "dimension change");
+    }
+
+    public boolean isTransitionPaused() {
+        return System.currentTimeMillis() < generationPausedUntilMs;
     }
 
     private double distSq(ChunkPos a, ChunkPos b) {
@@ -564,9 +667,56 @@ public final class ChunkGenerationManager {
     }
     
     private void completeTask(DimensionState state, ChunkPos pos) {
+        state.taskStartMs.remove(pos.pack());
         if (state.trackedChunks.remove(pos.pack())) {
             activeTaskCount.decrementAndGet();
             throttle.release();
+        }
+    }
+
+    /**
+     * Abandons generation tasks whose future never completed (chunk system parked the
+     * dimension, broken chunk load, etc.). Releasing the permit un-wedges the worker; the
+     * chunk stays un-completed so a later scan retries it. If the original future does
+     * finish afterwards, completeTask's trackedChunks guard makes the second release a no-op.
+     */
+    private void reapStuckTasks() {
+        int timeout = Config.DATA.stuckTaskTimeoutSeconds;
+        if (timeout <= 0) return;
+        long now = System.currentTimeMillis();
+
+        // Dimensions someone is standing in get the full timeout (their tasks are probably just
+        // slow). A dimension with NO players is parked by the chunk system, so its in-flight
+        // tasks are dead weight holding permits the occupied dimension needs — reclaim those
+        // after a short grace. The permit pool is global; this is what keeps a teleport from
+        // stalling generation where the player actually is.
+        Set<ResourceKey<Level>> occupied = new HashSet<>();
+        for (ServerPlayer p : PlayerTracker.getInstance().getPlayers()) {
+            occupied.add(p.level().dimension());
+        }
+        long occupiedCutoff = now - timeout * 1000L;
+        long emptyCutoff = now - Math.min(5, timeout) * 1000L;
+
+        for (var entry : dimensionStates.entrySet()) {
+            DimensionState state = entry.getValue();
+            if (state.taskStartMs.isEmpty()) continue;
+            boolean hasPlayers = occupied.contains(entry.getKey());
+            long cutoff = hasPlayers ? occupiedCutoff : emptyCutoff;
+            java.util.List<Long> stuck = new ArrayList<>();
+            state.taskStartMs.forEach((posKey, started) -> {
+                if (started < cutoff) stuck.add(posKey);
+            });
+            if (stuck.isEmpty()) continue;
+            VoxyWorldGenV2.LOGGER.warn(
+                "abandoning {} generation task(s) in {} ({}) - releasing permits, chunks will retry",
+                stuck.size(), entry.getKey().location(),
+                hasPlayers ? "stuck >" + timeout + "s" : "dimension has no players");
+            for (long posKey : stuck) {
+                ChunkPos pos = ChunkPos.unpack(posKey);
+                queueTicketRemove(state.level, pos);
+                onFailure(state, pos);
+                completeTask(state, pos);
+            }
         }
     }
     
