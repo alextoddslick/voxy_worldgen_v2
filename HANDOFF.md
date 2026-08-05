@@ -4,6 +4,17 @@ Fabric mod that background-generates chunks and streams LOD data for Voxy. Upstr
 MC 1.21.6–1.21.11; **this working tree is on branch `backport/1.21.1`** (MC 1.21.1,
 Fabric loader 0.17.2, Java 21).
 
+## Repos
+
+- `origin` = upstream `iSeeEthan/voxy_worldgen_v2` (do NOT push there).
+- `fork` = **https://github.com/alextoddslick/voxy_worldgen_v2** — Alex's fork; `backport/1.21.1`
+  is its default branch. Push backport work there. Further version ports go on new `backport/*`
+  branches on the fork. License note: upstream's custom LICENSE only permits forking for the
+  purpose of contributing back, so keep this a fork (never a standalone repo) and keep changes
+  PR-able upstream.
+- Pairs with the community Voxy 1.21.1 backport:
+  https://github.com/m3t4f1v3/voxy/tree/mc_1211-sodium0.8.12 (linked in README).
+
 ## Current state (2026-08-04)
 
 - Backport is functional server-side: mixins apply, ~16.5k chunks generated in automated
