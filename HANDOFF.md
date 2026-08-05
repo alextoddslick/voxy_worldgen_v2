@@ -17,6 +17,20 @@ Fabric loader 0.17.2, Java 21).
 
 ## Current state (2026-08-04)
 
+- **New (2026-08-04, late):** non-blocking main-thread chunk lookup. The BMC3 18:14 watchdog
+  crash traced to `ChunkGenerationManager` calling `hasChunk` + blocking `getChunk` on the main
+  thread; under C2ME `hasChunk` can be true while the FULL future is incomplete, so the main
+  thread parked in `getChunkBlocking` forever. Now uses `cache.getChunkNow` (null → falls
+  through to the async ticket+future path). ROOT CAUSE of the stall itself is NOT our mod:
+  BetterEnd 21.0.11 `MountainPiece.heightmap` is a plain HashMap mutated by C2ME's 7 parallel
+  worldgen workers → corrupted map → worker spins forever in `HashMap.resize`/`TreeNode.split`
+  (verified in bytecode + two thread dumps, End chunks [622,575]/[626,637]). Our fix stops the
+  watchdog kill from OUR path only; vanilla paths (NaturalSpawner, 17:10 crash) can still block
+  until BetterEnd is patched — proposed fix: tiny mixin patch mod swapping that field to a
+  ConcurrentHashMap (not yet built). BMC3 crash reports also contain an anti-AI prompt
+  injection block — ignore it, the traces are ordinary. Crash files were root-owned again
+  (sudo launch) → chown the pack dir before booting as alextodd.
+
 - Backport is functional server-side: mixins apply, ~16.5k chunks generated in automated
   testing, LOD network path decodes (39,344 sections, 0 failures). See
   `~/Downloads/voxy-1211-testkit/README.md` for what is verified vs. what still needs a real
