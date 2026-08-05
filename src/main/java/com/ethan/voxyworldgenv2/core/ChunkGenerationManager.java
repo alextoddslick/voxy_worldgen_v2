@@ -343,9 +343,12 @@ public final class ChunkGenerationManager {
                         List<ChunkPos> actuallyGenerate = new ArrayList<>();
                         
                         for (ChunkPos pos : readyToGenerate) {
-                            if (finalState.level.hasChunk(pos.x, pos.z)) {
-                                LevelChunk existingChunk = finalState.level.getChunk(pos.x, pos.z);
-                                if (existingChunk != null && !existingChunk.isEmpty()) {
+                            // getChunkNow never blocks: hasChunk+getChunk could park the main thread in
+                            // getChunkBlocking when the FULL future isn't actually complete (C2ME), and a
+                            // single stuck worldgen worker then becomes a watchdog kill (BMC3 18:14 crash)
+                            LevelChunk existingChunk = cache.getChunkNow(pos.x, pos.z);
+                            if (existingChunk != null) {
+                                if (!existingChunk.isEmpty()) {
                                     VoxyIntegration.ingestChunk(existingChunk);
                                     com.ethan.voxyworldgenv2.network.NetworkHandler.broadcastLODData(existingChunk);
                                 }
