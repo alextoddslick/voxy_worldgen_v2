@@ -253,7 +253,12 @@ public final class ChunkGenerationManager {
                                 ServerPlayer p = server.getPlayerList().getPlayer(playerUUID);
                                 if (p != null) {
                                     for (ChunkPos syncPos : finalSyncBatch) {
-                                        LevelChunk c = level.getChunkSource().getChunk(syncPos.x, syncPos.z, false);
+                                        // getChunkNow, not getChunk(x, z, false): the false only skips adding a
+                                        // ticket, it does NOT make the call non-blocking. Under C2ME a holder can
+                                        // sit at FULL ticket level with an incomplete FULL future that nothing will
+                                        // ever drive, and getChunk then parks the main thread until the watchdog
+                                        // kills the server (BMC3 17:03 crash)
+                                        LevelChunk c = level.getChunkSource().getChunkNow(syncPos.x, syncPos.z);
                                         if (c != null) {
                                             com.ethan.voxyworldgenv2.network.NetworkHandler.sendLODData(p, c);
                                         }

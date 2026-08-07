@@ -43,7 +43,11 @@ public class ChunkUpdateTracker {
         
         for (long posLong : toProcess) {
             ChunkPos pos = new ChunkPos(posLong);
-            LevelChunk chunk = level.getChunkSource().getChunk(pos.x, pos.z, false);
+            // processDirty runs on the server tick thread, so this must never block: getChunk's
+            // false only skips adding a ticket, and under C2ME it still parks the main thread on
+            // an incomplete FULL future that nothing will drive. A chunk that isn't resident is
+            // simply skipped; BlockUpdateMixin re-marks it dirty on the next block change.
+            LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x, pos.z);
             if (chunk != null) {
                 NetworkHandler.broadcastLODData(chunk);
             }
