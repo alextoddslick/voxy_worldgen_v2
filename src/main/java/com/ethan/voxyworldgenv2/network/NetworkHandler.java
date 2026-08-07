@@ -45,8 +45,15 @@ public class NetworkHandler {
         public static final Type<HandshakePayload> TYPE = new Type<>(HANDSHAKE_ID);
         public static final StreamCodec<FriendlyByteBuf, HandshakePayload> CODEC = CustomPacketPayload.codec(HandshakePayload::write, HandshakePayload::new);
 
+        /**
+         * Protocol 1 wrote only the boolean. Reading the version unconditionally would throw
+         * inside the netty decoder on a protocol-1 server and drop the connection with an opaque
+         * "Internal Exception" before the player reaches the world, so an absent version reads as
+         * 1 — which is exactly what it means. {@code supportsKnownChunks()} then stays false, the
+         * client never uploads, and the session behaves as it did before this feature existed.
+         */
         public HandshakePayload(FriendlyByteBuf buf) {
-            this(buf.readBoolean(), buf.readVarInt());
+            this(buf.readBoolean(), buf.isReadable() ? buf.readVarInt() : 1);
         }
 
         public void write(FriendlyByteBuf buf) {
@@ -231,6 +238,14 @@ public class NetworkHandler {
      * order, and the cost is bounded — a 64-chunk radius is ~16k inserts (sub-millisecond). A
      * 512-chunk radius is ~1M inserts and costs roughly 100ms once per join, which the timing warn
      * below surfaces. That is three orders of magnitude short of the 60s watchdog.
+     *
+     * <p>"Once per join" is a description of the honest client, not something the protocol
+     * enforces, so it is enforced here. Each accepted packet is up to 180 regions x 1024 chunks =
+     * 184,320 set insertions on the main thread, and a modified client can send them at packet
+     * rate. Two cheap guards bound that: the payload must name the dimension the player is
+     * actually in, and only a small number of packets are accepted per dimension entry, ending as
+     * soon as the client's {@code last} packet arrives. Rejections are logged and ignored rather
+     * than disconnecting — a false negative here only costs a re-send.
      */
     private static void receiveKnownChunks(ServerPlayer player, KnownChunksPayload payload) {
         if (!com.ethan.voxyworldgenv2.core.Config.DATA.rememberSentChunks) return;
@@ -239,7 +254,22 @@ public class NetworkHandler {
         var store = tracker.getStore(player.getUUID());
         if (store == null) return;
 
-        String dim = PlayerTracker.dimensionId(payload.dimension());
+        // Budget first, and keyed on where the player actually is rather than on anything the
+        // payload claims: a rejected packet must still cost the sender its allowance, or a client
+        // spraying payloads this method refuses would drive the logging below at packet rate.
+        String dim = PlayerTracker.dimensionId(player.level().dimension());
+        if (!tracker.acceptKnownChunksPacket(player.getUUID(), dim)) return;
+
+        // A known set for a dimension the player is not in cannot be verified against anything and
+        // is not something an honest client sends: it uploads on entering a dimension, by which
+        // point the server has already moved it. Rejecting costs at most one re-send.
+        if (!player.level().dimension().equals(payload.dimension())) {
+            VoxyWorldGenV2.LOGGER.warn("ignoring known-chunks batch from {} for {} while they are in {}",
+                player.getName().getString(), payload.dimension().location(),
+                player.level().dimension().location());
+            return;
+        }
+
         long startedNs = System.nanoTime();
         int added;
         try {
@@ -257,6 +287,7 @@ public class NetworkHandler {
         }
 
         if (payload.last()) {
+            tracker.finishKnownChunksUpload(player.getUUID(), dim);
             tracker.clearGate(player.getUUID(), dim);
             VoxyWorldGenV2.LOGGER.info("{} reports {} known chunks in {}; skipping re-send",
                 player.getName().getString(), store.size(dim), dim);
