@@ -182,14 +182,15 @@ public class NetworkHandler {
         VoxyWorldGenV2.LOGGER.info("voxy networking initialized");
     }
 
-    private static void setSyncedState(ServerPlayer player, ChunkPos pos, boolean isSynced) {
-        var synced = PlayerTracker.getInstance().getSyncedChunks(player.getUUID());
-        if (synced != null) {
-            if (isSynced) {
-                synced.add(pos.pack());
-            } else {
-                synced.remove(pos.pack());
-            }
+    private static void setSyncedState(ServerPlayer player, ResourceKey<Level> dimension,
+                                       ChunkPos pos, boolean isSynced) {
+        var store = PlayerTracker.getInstance().getStore(player.getUUID());
+        if (store == null) return;
+        String dim = PlayerTracker.dimensionId(dimension);
+        if (isSynced) {
+            store.markSynced(dim, pos.pack());
+        } else {
+            store.markUnsynced(dim, pos.pack());
         }
     }
 
@@ -209,7 +210,7 @@ public class NetworkHandler {
             double dz = player.getZ() - (pos.getMiddleBlockZ());
 
             if (player.level() != chunk.getLevel() || (dx * dx + dz * dz > maxDistSq)) {
-                setSyncedState(player, pos, false);
+                setSyncedState(player, dimension, pos, false);
                 continue;
             }
 
@@ -217,23 +218,24 @@ public class NetworkHandler {
                 player, dimension, pos, minY, sections, registryAccess);
             // Mirror the enqueue result into the synced set: accepted chunks won't be re-sent by
             // the catch-up path, dropped ones will be.
-            setSyncedState(player, pos, accepted);
+            setSyncedState(player, dimension, pos, accepted);
         }
     }
 
     public static void sendLODData(ServerPlayer player, LevelChunk chunk) {
         ChunkPos pos = chunk.getPos();
         int minY = chunk.getMinSectionY();
+        ResourceKey<Level> dimension = chunk.getLevel().dimension();
         List<LodSendQueue.PendingSection> sections = snapshotSections(chunk);
 
         if (sections.isEmpty()) {
-            setSyncedState(player, pos, false);
+            setSyncedState(player, dimension, pos, false);
             return;
         }
 
-        boolean accepted = LodSendQueue.getInstance().enqueue(player, chunk.getLevel().dimension(),
+        boolean accepted = LodSendQueue.getInstance().enqueue(player, dimension,
             pos, minY, sections, chunk.getLevel().registryAccess());
-        setSyncedState(player, pos, accepted);
+        setSyncedState(player, dimension, pos, accepted);
     }
 
     /**
