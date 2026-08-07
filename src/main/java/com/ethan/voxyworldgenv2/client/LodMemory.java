@@ -47,15 +47,30 @@ public final class LodMemory {
     // client level can appear before it does. Uploading straight from switchTo() would therefore
     // silently no-op on a fast join, the server's gate would time out, and the whole radius would
     // re-stream — the exact bug this class exists to prevent. So the upload is deferred until the
-    // handshake has landed, and abandoned if it never does (server without the mod).
+    // handshake has landed. If it is simply late (server lag, slow channel registration) a single
+    // fixed wait would abandon the upload permanently and re-stream the whole radius anyway, so
+    // this retries on a backoff and only gives up after a few attempts (server without the mod,
+    // or too old).
     private static boolean pendingUpload;
     private static long pendingSinceMs;
-    private static final long UPLOAD_WAIT_MS = 15_000L;
+    private static int uploadAttempts;
+    private static final long UPLOAD_INITIAL_WAIT_MS = 15_000L;
+    private static final int MAX_UPLOAD_ATTEMPTS = 4;
 
     private LodMemory() {}
 
-    public static synchronized void record(int chunkX, int chunkZ) {
-        if (dimensionId == null) return;
+    /**
+     * Records a chunk as known, but only for the dimension the caller says it belongs to.
+     *
+     * <p>{@code dimensionId}/{@code dimension} are only refreshed when {@link #tick} notices a
+     * dimension change, up to one client tick after {@code Minecraft.getInstance().level} has
+     * actually switched. A LOD payload for the new dimension can arrive and be ingested in that
+     * window, so the caller must state which dimension it ingested for rather than this class
+     * trusting whichever dimension it last cached — otherwise the record lands in the stale
+     * (old) dimension's map and gets persisted there on the next flush.
+     */
+    public static synchronized void record(ResourceKey<Level> payloadDimension, int chunkX, int chunkZ) {
+        if (dimensionId == null || !payloadDimension.equals(dimension)) return;
         byte[] mask = regions.computeIfAbsent(
             RegionBitmask.regionKey(chunkX, chunkZ), k -> new byte[RegionBitmask.MASK_BYTES]);
         if (!RegionBitmask.get(mask, chunkX, chunkZ)) {
@@ -83,9 +98,24 @@ public final class LodMemory {
             if (NetworkState.supportsKnownChunks()) {
                 upload();
                 pendingUpload = false;
-            } else if (now - pendingSinceMs > UPLOAD_WAIT_MS) {
-                // No handshake in 15s: this server does not have the mod, or is too old.
-                pendingUpload = false;
+                uploadAttempts = 0;
+            } else {
+                // Exponential backoff: 15s, 30s, 60s, 120s between checks, capped at
+                // MAX_UPLOAD_ATTEMPTS retries so a legitimately slow handshake (server lag, slow
+                // channel registration) still gets uploaded instead of the whole radius
+                // re-streaming just because the first check was too early.
+                long waitMs = UPLOAD_INITIAL_WAIT_MS << uploadAttempts;
+                if (now - pendingSinceMs > waitMs) {
+                    uploadAttempts++;
+                    if (uploadAttempts >= MAX_UPLOAD_ATTEMPTS) {
+                        pendingUpload = false;
+                        VoxyWorldGenV2.LOGGER.warn(
+                            "giving up waiting for the server handshake after {} attempts; known LOD chunks for {} were not uploaded this session (still cached on disk for next join)",
+                            uploadAttempts, dimensionId);
+                    } else {
+                        pendingSinceMs = now;
+                    }
+                }
             }
         }
 
@@ -103,6 +133,7 @@ public final class LodMemory {
         dimension = null;
         dirty = false;
         pendingUpload = false;
+        uploadAttempts = 0;
     }
 
     /** Flush the previous dimension, load the new one, upload it. */
@@ -131,6 +162,7 @@ public final class LodMemory {
 
         pendingUpload = true;
         pendingSinceMs = System.currentTimeMillis();
+        uploadAttempts = 0;
     }
 
     /**

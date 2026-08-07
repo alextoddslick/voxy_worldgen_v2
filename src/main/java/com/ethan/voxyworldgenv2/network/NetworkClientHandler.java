@@ -50,7 +50,10 @@ public class NetworkClientHandler {
         }
         NetworkState.incrementReceived(bytes);
 
-        boolean anyIngested = false;
+        // LodMemory/RegionBitmask track presence per chunk column, not per section, so there is
+        // no way to represent "half of this chunk is in Voxy" -- it is all-or-nothing. A payload
+        // with no sections is never recorded as known.
+        boolean allIngested = !payload.sections().isEmpty();
         for (NetworkHandler.LODDataPayload.SectionData sectionData : payload.sections()) {
             io.netty.buffer.ByteBuf statesRaw = io.netty.buffer.Unpooled.wrappedBuffer(sectionData.states());
             io.netty.buffer.ByteBuf biomesRaw = io.netty.buffer.Unpooled.wrappedBuffer(sectionData.biomes());
@@ -77,20 +80,21 @@ public class NetworkClientHandler {
                 DataLayer sl = sectionData.skyLight() != null ? new DataLayer(sectionData.skyLight()) : null;
                 
                 VoxyIntegration.rawIngest(level, section, payload.pos().x, sectionData.y(), payload.pos().z, bl, sl);
-                anyIngested = true;
 
             } catch (Exception e) {
                 VoxyWorldGenV2.LOGGER.error("failed to handle LOD data for chunk " + payload.pos(), e);
+                allIngested = false;
             } finally {
                 statesRaw.release();
                 biomesRaw.release();
             }
         }
 
-        // Record only what actually reached Voxy: the memory must mean "Voxy has this", not
-        // "a packet arrived", or the server will skip chunks that never made it in.
-        if (anyIngested) {
-            com.ethan.voxyworldgenv2.client.LodMemory.record(payload.pos().x, payload.pos().z);
+        // Record only what actually reached Voxy in full: the memory must mean "Voxy has this",
+        // not "a packet arrived", or the server will skip chunks that never made it in. A chunk
+        // with even one failed section is not recorded, since LodMemory tracks whole columns.
+        if (allIngested) {
+            com.ethan.voxyworldgenv2.client.LodMemory.record(payload.dimension(), payload.pos().x, payload.pos().z);
         }
     }
 }
