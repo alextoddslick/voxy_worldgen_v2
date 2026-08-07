@@ -236,10 +236,21 @@ public final class ChunkGenerationManager {
                         if (synced == null) continue;
                         
                         DimensionState ds = getOrSetupState((ServerLevel) player.level());
-                        int radius = ds.tellusActive ? Math.max(Config.DATA.generationRadius, 128) : Config.DATA.generationRadius;
+                        String dimId = PlayerTracker.dimensionId(player.level().dimension());
+                        int baseRadius = ds.tellusActive
+                            ? Math.max(Config.DATA.generationRadius, 128) : Config.DATA.generationRadius;
+                        // A /voxygen refresh can ask for a wider sweep than generationRadius. Widening
+                        // the catch-up radius is what re-sends those chunks without a second send path.
+                        int refreshOverride = PlayerTracker.getInstance()
+                            .getRefreshRadius(player.getUUID(), dimId);
+                        int radius = Math.max(baseRadius, refreshOverride);
                         List<ChunkPos> syncBatch = new ArrayList<>();
                         ds.distanceGraph.collectCompletedInRange(player.chunkPosition(), radius, synced, syncBatch, 64);
-                        
+
+                        if (syncBatch.isEmpty() && refreshOverride > 0) {
+                            PlayerTracker.getInstance().clearRefreshRadius(player.getUUID(), dimId);
+                        }
+
                         if (!syncBatch.isEmpty()) {
                             workDispatched = true;
                             final List<ChunkPos> finalSyncBatch = new ArrayList<>(syncBatch);
