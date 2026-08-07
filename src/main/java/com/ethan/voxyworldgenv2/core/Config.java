@@ -86,7 +86,10 @@ public final class Config {
         public int knownChunksTimeoutSeconds = 10;
         // Permission level required for /voxygen refresh. 0 lets any player refresh themselves.
         // Targeting another player always requires level 2 regardless of this value, so lowering
-        // it cannot let one player force egress onto another.
+        // it cannot let one player force egress onto another. Clamped to the valid vanilla range
+        // 0-4 wherever it's read: anything outside that range is either always-true (negative,
+        // which would defeat the point) or unsatisfiable even by a level-4 admin (above 4, which
+        // would make refresh silently unreachable by anyone).
         public int refreshPermissionLevel = 2;
         // What "/voxygen refresh near" means, in chunks.
         public int refreshDefaultRadius = 16;
