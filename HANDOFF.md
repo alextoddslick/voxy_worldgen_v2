@@ -114,7 +114,18 @@ cause not confirmed beyond this.
   (`client/LodMemory.java`, persisted under `<gamedir>/voxyworldgenv2/lodmemory/<worldkey>/`),
   uploads them on join and dimension change, and the server seeds its per-player synced set from
   that instead of re-streaming everything. Reconnect egress should be near zero.
-  - **PROTOCOL CHANGE** (`PROTOCOL_VERSION = 2`): client and server jars must move together.
+  - **PROTOCOL CHANGE** (`PROTOCOL_VERSION = 2`): client and server jars must still move
+    together. What each mismatch direction actually does:
+    - **Old client + new server: drops.** The handshake now carries a trailing version varint the
+      old client's reader never consumes, and vanilla's packet decoder rejects a payload with
+      bytes left over ("larger than I expected"). It also cannot decode a compressed
+      `LODDataPayload`. Nothing degrades here; the connection fails.
+    - **New client + old server: degrades to pre-feature behaviour, as far as the handshake
+      goes.** A missing version field now reads as protocol 1 instead of throwing inside the netty
+      decoder, so `supportsKnownChunks()` stays false, the client never uploads, and the server
+      re-streams exactly as it did before this feature. But a server older than the 2026-08-04
+      `LODDataPayload` compression still sends LOD sections the new client cannot decode, so this
+      is survivable-join, not a supported pairing.
   - Fixed on the way: `PlayerTracker.syncedChunks` was one flat `LongSet` per player, so
     overworld and nether chunks at the same coordinates collided. Now `SyncedChunkStore`, keyed
     by dimension.
@@ -128,9 +139,14 @@ cause not confirmed beyond this.
     `knownChunksTimeoutSeconds` (join-gate timeout for a vanilla/older client that never uploads,
     default 10s, 0 disables), `refreshPermissionLevel` (default 2, clamped 0-4; targeting another
     player always needs level 2 regardless), `refreshDefaultRadius` (default 16, what `near` means).
-  - This branch now has a test suite (`src/test/java`, JUnit 5, 22 tests) covering the bitmask
-    codec and the synced store. `./gradlew build` runs it; a build with failing tests does not
-    produce a jar to deploy.
+  - This branch now has a test suite (`src/test/java`, JUnit 5, 28 tests) covering the bitmask
+    codec, the synced store and the handshake codec. `./gradlew build` runs it; a build with
+    failing tests does not produce a jar to deploy.
+  - Two invariants worth not breaking: the client records a chunk only when
+    `VoxyIntegration.rawIngest` **returns true** (it reports failure rather than throwing, so a
+    Voxy version whose `rawIngest` we cannot resolve no longer records phantom chunks), and the
+    worker's catch-up pre-mark means "claimed", not "delivered" — chunks that were not resident
+    are recorded deferred in `SyncedChunkStore` and `onChunkLoad` still sends those.
 
 - **New (2026-08-04, late):** non-blocking main-thread chunk lookup. The BMC3 18:14 watchdog
   crash traced to `ChunkGenerationManager` calling `hasChunk` + blocking `getChunk` on the main
