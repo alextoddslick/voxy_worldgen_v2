@@ -17,7 +17,7 @@ It is built to pair with the **community 1.21.1 backport of Voxy** itself:
 that Voxy build (or a compatible one) on the client for LODs to render.
 
 Beyond the version downgrade, this branch adds server-operations features on top of upstream:
-`/voxygen` admin commands (status, traffic, rate limiting, live reload), an off-thread LOD send
+`/voxygen` admin commands (status, traffic, rate limiting, refresh, live reload), an off-thread LOD send
 queue with backpressure and per-player bandwidth caps, whole-batch zlib compression of LOD
 payloads, periodic generation progress logging, a virtual-book settings UI, and a tab-list HUD.
 

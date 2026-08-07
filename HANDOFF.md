@@ -15,7 +15,122 @@ Fabric loader 0.17.2, Java 21).
 - Pairs with the community Voxy 1.21.1 backport:
   https://github.com/m3t4f1v3/voxy/tree/mc_1211-sodium0.8.12 (linked in README).
 
+## Session handoff (2026-08-06, evening) — READ FIRST
+
+**Nothing below is committed, except this repo's `ChunkGenerationManager.java`/`ChunkUpdateTracker.java`
+fixes, which landed as `a6403b2` at the start of the client-LOD-memory work.** `BetterEndAddons` still
+has working-tree-only changes, and `backport/1.21.1` is the default branch there too, so branch before
+committing.
+
+This session touched, in `voxy_worldgen_v2`: `ChunkGenerationManager.java`, `ChunkUpdateTracker.java`
+(both now committed as `a6403b2`), `HANDOFF.md`. In `BetterEndAddons`: `BetterEndAddons.java`, `config/AddonConfig.java`,
+`betterendaddons.mixins.json`, and the new `mixin/common/structure/`. **`gradle.properties` and
+`generator/EndLandBiomeDecider.java` in BetterEndAddons were already dirty beforehand and are NOT from
+this session** — review them separately rather than sweeping them into one commit.
+
+### 1. The BMC3 17:03 watchdog crash was OURS — two blocking chunk fetches, both now fixed
+
+`ServerChunkCache.getChunk(x, z, load)` is **never** safe on the main thread, not even with
+`load=false`. The `false` only skips adding a ticket; the call still `managedBlock`s on the chunk's
+FULL future, and under C2ME a holder can sit at FULL ticket level with a future nothing will ever
+drive. The main thread parks until the 60 s watchdog kills the server. Only `getChunkNow` is safe.
+
+Commit `3bbe7d1` (2026-08-04) fixed the ingest path but missed two more sites, both now on
+`getChunkNow`:
+
+- `core/ChunkGenerationManager.java:255` — the catch-up **sync** path. This is what actually killed
+  the server. It only runs once generation catches up and `findWork` returns null, so it stays
+  hidden until a dimension finishes filling its radius (log showed `189 remaining (~0s)` seconds
+  before the stall).
+- `core/ChunkUpdateTracker.java:46` — reached from `tick()` on `END_SERVER_TICK`, so it ran on the
+  main thread every 2 s per active dimension. Never crashed, but was a live landmine.
+
+Evidence: main thread parked in `getChunkBlocking` from our frame, **every** c2me worker, the c2me
+scheduler and all 30 C2ME Storage threads idle — a real deadlock, not slow generation.
+
+**When grepping for more of these, do NOT filter with `grep -v getChunkSource`** — the call is written
+`level.getChunkSource().getChunk(...)`, so that filter hides the exact lines you want. It hid the
+`ChunkUpdateTracker` site on the first sweep.
+
+### 2. BetterEnd mountain concurrency — fixed in Alex's own addon repo
+
+Root cause of every End stall and every `Feature placement` crash: `MountainPiece.heightmap` is a
+plain HashMap shared across parallel C2ME workers (a piece's `postProcess` runs once per overlapping
+chunk, all resolving to one instance). Corruption shows up either as a worker spinning in
+`HashMap.resize`/`TreeNode.split` or as a `ClassCastException` in the treeify path. All six debug
+dumps were `betterend:mountain` / `betterend:painted_mountain`.
+
+Fixed in **`~/temp/Github-NOTSYNCED/BetterEndAddons`** (`alextoddslick/BetterEndAddons`) as
+`mixin/common/structure/MountainPieceMixin.java` — that repo already compiles against the exact
+`libs/better-end-21.0.11.jar`, uses Mojang mappings, and already mixes into BetterEnd worldgen. A
+`ConcurrentHashMap` is a complete fix, not a mitigation: values are deterministic per position and
+nothing accumulates, so a duplicated concurrent compute yields an identical value.
+
+**Mixin gotcha that cost a failed boot:** one `@Inject(method = "<init>")` matched both constructors
+but injected into only one (`(1/2) succeeded`). Use one `@Inject` per constructor with its full
+explicit descriptor. `require` is what turned this into a loud boot failure instead of a silent
+half-fix leaving NBT-reloaded pieces unpatched.
+
+Upstream will not fix this: reported against C2ME since 1.16.5, and `paulevsGitch/BetterEnd` was
+archived read-only 2025-05-02.
+
+### 3. BiomeVisualizer is now opt-in (BetterEndAddons)
+
+It sampled 16,384 biomes and wrote JSON **on the server thread every 2 s**, cached only while the
+player stood still — the `BiomeVisualizer.writeState took 593ms` spikes. Now gated behind
+`enableBiomeVisualizer` (default false) in `config/betterendaddons/config.json`; when off the tick
+listener is never registered.
+
+### 4. Test rig state
+
+BMC3 is **running on a fresh world** with both fixes. Old world moved (not deleted) to
+`~/mc-test/bmc3/world.bak-20260806-172834` — 458 MB, delete when satisfied. Seed is unchanged
+(`level-seed` in server.properties), so coordinates still line up with the vanilla control server.
+Our `ChunkPersistence` .bin lived inside `world/` so it reset with it, which is correct.
+
+Deployed: `voxyworldgenv2` sha `cd1aee672e8e`, `betterendaddons` sha `c087b4abefe5` (also copied to
+`~/Downloads/betterendaddons-0.1.0.jar` for transfer). The vanilla server still runs an older jar in
+memory and picks the new one up on restart. Both fixes are **server-side only** — no protocol change,
+client jars unaffected.
+
+**This branch has no test suite** (`:test NO-SOURCE`); it lives on `experimental/gpu-worldgen`. Builds
+verify compilation only.
+
+### 5. Shaders — not our code; Alex resolved it himself
+
+Client shader failures (`iris:sodium-shader-voxels: undefined variable "result_block_id"`) are not
+ours: `voxyworldgenv2` has zero shader/GL code and the compile fails at TitleScreen init before any
+server connection. Diffing the failing instance (`BMC3 - VoxyWorldGen v1`, 515 mods) against a working
+one (`Better MC [FABRIC] BMC3 (3)`, 513 mods) left exactly two extras: `photonics 0.2.9` and
+`voxyworldgenv2`. **Photonics is a raytracing mod that injects GLSL into the pack at runtime** — Photon
+ships an empty `shaders/photonics/photonics.glsl` placeholder for exactly that — so a pack without a
+photonics integration file gets injected code referencing variables it never defines. Alex fixed it;
+cause not confirmed beyond this.
+
 ## Current state (2026-08-04)
+
+- **New (2026-08-06):** client LOD memory + `/voxygen refresh`. The client records every chunk
+  it successfully ingests into Voxy as 32x32 region bitmasks
+  (`client/LodMemory.java`, persisted under `<gamedir>/voxyworldgenv2/lodmemory/<worldkey>/`),
+  uploads them on join and dimension change, and the server seeds its per-player synced set from
+  that instead of re-streaming everything. Reconnect egress should be near zero.
+  - **PROTOCOL CHANGE** (`PROTOCOL_VERSION = 2`): client and server jars must move together.
+  - Fixed on the way: `PlayerTracker.syncedChunks` was one flat `LongSet` per player, so
+    overworld and nether chunks at the same coordinates collided. Now `SyncedChunkStore`, keyed
+    by dimension.
+  - `/voxygen refresh <near|N|all> [player] [dimension]` forgets synced bits so the existing
+    catch-up loop re-sends them. It never triggers generation. `all` forgets the whole dimension
+    but the re-send sweep is capped at 512 chunks. A radius refresh (`near`/`N`) targeting an
+    explicit `[dimension]` the player isn't currently standing in is refused (no centre to sweep
+    from) — use `all <player> <dimension>` instead, which ignores position entirely.
+  - Config fields (`core/Config.java`): `rememberSentChunks` (master switch; `false` is the full
+    rollback — server ignores uploaded known-chunk sets and re-streams everything as before),
+    `knownChunksTimeoutSeconds` (join-gate timeout for a vanilla/older client that never uploads,
+    default 10s, 0 disables), `refreshPermissionLevel` (default 2, clamped 0-4; targeting another
+    player always needs level 2 regardless), `refreshDefaultRadius` (default 16, what `near` means).
+  - This branch now has a test suite (`src/test/java`, JUnit 5, 22 tests) covering the bitmask
+    codec and the synced store. `./gradlew build` runs it; a build with failing tests does not
+    produce a jar to deploy.
 
 - **New (2026-08-04, late):** non-blocking main-thread chunk lookup. The BMC3 18:14 watchdog
   crash traced to `ChunkGenerationManager` calling `hasChunk` + blocking `getChunk` on the main
