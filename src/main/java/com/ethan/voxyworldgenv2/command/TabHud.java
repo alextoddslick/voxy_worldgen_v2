@@ -114,7 +114,7 @@ public final class TabHud {
     }
 
     private static Component playerLine(ServerPlayer p, long bytes, boolean isViewer) {
-        var synced = PlayerTracker.getInstance().getSyncedChunks(p.getUUID());
+        var synced = PlayerTracker.getInstance().getSyncedChunks(p.getUUID(), p.level().dimension());
         int syncedCount = synced != null ? synced.size() : 0;
         return Component.empty()
             .append(Component.literal(isViewer ? "you" : p.getName().getString())

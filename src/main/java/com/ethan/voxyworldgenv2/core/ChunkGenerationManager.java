@@ -230,7 +230,8 @@ public final class ChunkGenerationManager {
                     // if no generation work, try to catch up on syncing for any player
                     boolean workDispatched = false;
                     for (ServerPlayer player : players) {
-                        var synced = PlayerTracker.getInstance().getSyncedChunks(player.getUUID());
+                        var synced = PlayerTracker.getInstance()
+                            .getSyncedChunks(player.getUUID(), player.level().dimension());
                         if (synced == null) continue;
                         
                         DimensionState ds = getOrSetupState((ServerLevel) player.level());

@@ -20,7 +20,7 @@ public class PlayerTracker {
     // chunks forever for nobody. Measured on a 1.21.1 dedicated server: this tracker reported 1
     // player while the server's own player list reported 0, with generation still running.
     private final Map<UUID, ServerPlayer> players;
-    private final Map<UUID, it.unimi.dsi.fastutil.longs.LongSet> syncedChunks;
+    private final Map<UUID, SyncedChunkStore> syncedChunks;
 
     private PlayerTracker() {
         this.players = new ConcurrentHashMap<>();
@@ -34,8 +34,7 @@ public class PlayerTracker {
     public void addPlayer(ServerPlayer player) {
         UUID id = player.getUUID();
         players.put(id, player);
-        syncedChunks.computeIfAbsent(id, k ->
-            it.unimi.dsi.fastutil.longs.LongSets.synchronize(new it.unimi.dsi.fastutil.longs.LongOpenHashSet()));
+        syncedChunks.computeIfAbsent(id, k -> new SyncedChunkStore());
     }
 
     public void removePlayer(ServerPlayer player) {
@@ -86,8 +85,19 @@ public class PlayerTracker {
         return Collections.unmodifiableCollection(players.values());
     }
 
-    public it.unimi.dsi.fastutil.longs.LongSet getSyncedChunks(UUID uuid) {
+    public SyncedChunkStore getStore(java.util.UUID uuid) {
         return syncedChunks.get(uuid);
+    }
+
+    public it.unimi.dsi.fastutil.longs.LongSet getSyncedChunks(
+            java.util.UUID uuid, net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension) {
+        SyncedChunkStore store = syncedChunks.get(uuid);
+        return store == null ? null : store.setFor(dimensionId(dimension));
+    }
+
+    /** Stable string key for a dimension, e.g. "minecraft:overworld". */
+    public static String dimensionId(net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension) {
+        return dimension.location().toString();
     }
 
     public int getPlayerCount() {
