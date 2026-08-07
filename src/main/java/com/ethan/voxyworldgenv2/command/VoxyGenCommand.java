@@ -40,8 +40,7 @@ public final class VoxyGenCommand {
         // The root is visible to anyone who could use ANY subtree, so refresh can carry a
         // configurable level of its own. Every pre-existing subtree keeps op level 2 explicitly.
         LiteralArgumentBuilder<CommandSourceStack> root = Commands.literal("voxygen")
-            .requires(src -> src.hasPermission(
-                Math.min(PERMISSION_OP, Math.max(0, Config.DATA.refreshPermissionLevel))));
+            .requires(src -> src.hasPermission(Math.min(PERMISSION_OP, refreshPermissionLevel())));
 
         root.then(op(buildStatus()));
         root.then(op(buildRadius()));
@@ -63,6 +62,18 @@ public final class VoxyGenCommand {
 
     private static ArgumentBuilder<CommandSourceStack, ?> op(ArgumentBuilder<CommandSourceStack, ?> node) {
         return node.requires(src -> src.hasPermission(PERMISSION_OP));
+    }
+
+    /**
+     * Vanilla permission levels run 0-4; {@code hasPermission(n)} for n > 4 is unsatisfiable by
+     * anyone, including a level-4 admin, which would make {@code /voxygen refresh} silently
+     * unreachable on a config typo. Clamping here — read live on every call, never cached, since
+     * {@code /voxygen reload} can change {@code Config.DATA} at runtime — and using this same
+     * helper at both the root's {@code Math.min(PERMISSION_OP, ...)} and {@code refresh}'s own
+     * {@code .requires()} means the two can never disagree about who may reach refresh.
+     */
+    private static int refreshPermissionLevel() {
+        return Math.min(4, Math.max(0, Config.DATA.refreshPermissionLevel));
     }
 
     // ---- subtrees -------------------------------------------------------------------------
@@ -144,7 +155,7 @@ public final class VoxyGenCommand {
 
     private static ArgumentBuilder<CommandSourceStack, ?> buildRefresh() {
         return Commands.literal("refresh")
-            .requires(src -> src.hasPermission(Math.max(0, Config.DATA.refreshPermissionLevel)))
+            .requires(src -> src.hasPermission(refreshPermissionLevel()))
             .executes(ctx -> refresh(ctx, Config.DATA.refreshDefaultRadius, false, null, null))
             .then(refreshTarget(Commands.literal("near"), c -> Config.DATA.refreshDefaultRadius, false))
             .then(refreshTarget(Commands.literal("all"), c -> REFRESH_ALL_RADIUS, true))
@@ -337,6 +348,24 @@ public final class VoxyGenCommand {
 
         ServerLevel level = explicitDimension != null ? explicitDimension : (ServerLevel) target.level();
         String dim = PlayerTracker.dimensionId(level.dimension());
+
+        // A radius sweep centres on target.chunkPosition(), which is always the target's REAL
+        // current position — we don't track a last-known position per dimension, so if the named
+        // dimension isn't the one they're standing in there is no correct centre to sweep from.
+        // Transplanting overworld coordinates into the nether/end would silently search the wrong
+        // space and almost always report "0 forgotten", which reads as "nothing was there" rather
+        // than "this command can't do what you asked". forgetAll ignores position, so "all" is
+        // unaffected and still works from anywhere.
+        if (!all && explicitDimension != null
+                && !explicitDimension.dimension().equals(target.level().dimension())) {
+            reply(ctx, String.format(
+                "§c%s isn't in §b%s§r right now, so a radius refresh has no centre to sweep from there",
+                target.getName().getString(), dim));
+            reply(ctx, String.format(
+                "§7 either run this while they're in %s, or use §b/voxygen refresh all %s %s§r instead",
+                dim, target.getName().getString(), dim));
+            return 0;
+        }
 
         var store = PlayerTracker.getInstance().getStore(target.getUUID());
         if (store == null) {
