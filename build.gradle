@@ -26,6 +26,9 @@ dependencies {
         exclude(group: "net.fabricmc.fabric-api")
     }
     modImplementation "com.terraformersmc:modmenu:${mod_menu_version}"
+
+    testImplementation "org.junit.jupiter:junit-jupiter:5.10.2"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
 }
 
 processResources {
@@ -49,6 +52,21 @@ java {
     withSourcesJar()
     sourceCompatibility = 21
     targetCompatibility = 21
+}
+
+// Loom does not always propagate the remapped Minecraft classpath to the test source set,
+// and SyncedChunkStore (Task 2) needs fastutil, which arrives transitively from Minecraft.
+// Adding it explicitly is inert when Loom already did it.
+sourceSets {
+    test {
+        compileClasspath += sourceSets.main.compileClasspath
+        runtimeClasspath += sourceSets.main.runtimeClasspath
+    }
+}
+
+test {
+    useJUnitPlatform()
+    testLogging { events "passed", "skipped", "failed" }
 }
 
 jar {
