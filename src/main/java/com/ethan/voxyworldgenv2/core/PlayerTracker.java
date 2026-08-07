@@ -1,5 +1,6 @@
 package com.ethan.voxyworldgenv2.core;
 
+import com.ethan.voxyworldgenv2.VoxyWorldGenV2;
 import net.minecraft.server.level.ServerPlayer;
 
 import java.util.Collection;
@@ -31,6 +32,23 @@ public class PlayerTracker {
     /** Catch-up radius override while a /voxygen refresh drains. UUID -> dimension id -> chunks. */
     private final Map<UUID, Map<String, Integer>> refreshRadius = new ConcurrentHashMap<>();
 
+    /**
+     * How many known-chunk packets this player has spent for a dimension since entering it, or
+     * {@link #UPLOAD_FINISHED} once their final packet arrived. UUID -> dimension id -> count.
+     *
+     * <p>Applying a batch is up to 184,320 set insertions on the main server thread, so the count
+     * of batches a client can spend has to be bounded by something other than the client's good
+     * manners. Reset on join and on dimension entry, which is when an honest client uploads.
+     */
+    private final Map<UUID, Map<String, Integer>> knownChunksBudget = new ConcurrentHashMap<>();
+
+    /**
+     * A radius-512 known set is ~1,089 regions, about 6 packets. Well above any legitimate upload
+     * and still only a few hundred milliseconds of work if a client spends the whole allowance.
+     */
+    private static final int MAX_KNOWN_CHUNKS_PACKETS = 32;
+    private static final int UPLOAD_FINISHED = -1;
+
     private PlayerTracker() {
         this.players = new ConcurrentHashMap<>();
         this.syncedChunks = new ConcurrentHashMap<>();
@@ -40,18 +58,44 @@ public class PlayerTracker {
         return INSTANCE;
     }
 
+    /**
+     * A JOIN is always a new connection, which will upload its own known set, so all per-session
+     * state is replaced rather than reused.
+     *
+     * <p>Keeping the previous store would be a false positive that outlives the session: the
+     * disconnect event is not guaranteed to fire (see {@link #reconcile}), and a player who
+     * rejoins inside the one-second reconcile window would otherwise land on the old store. Since
+     * {@code applyRegions} is additive, the seeded set would become the union of stale server
+     * belief and client truth — and the difference between those two is precisely the chunks the
+     * server marked synced but the client never ingested, i.e. permanently blank terrain.
+     */
     public void addPlayer(ServerPlayer player) {
         UUID id = player.getUUID();
         players.put(id, player);
-        syncedChunks.computeIfAbsent(id, k -> new SyncedChunkStore());
+        syncedChunks.put(id, new SyncedChunkStore());
+        awaitingKnownSet.remove(id);
+        refreshRadius.remove(id);
+        knownChunksBudget.remove(id);
     }
 
+    /**
+     * Drops a player, but only if the instance disconnecting is the one being tracked.
+     *
+     * <p>Vanilla's {@code PlayerList.remove} guards the same way. A duplicate login disconnects the
+     * old connection after the new one's JOIN has already fired, and without the guard that late
+     * disconnect wipes the live session's tracking — which {@link #reconcile} never repairs,
+     * because it only prunes and refreshes, it never re-adds. A skipped removal is harmless by
+     * comparison: reconcile drops entries whose player is gone within a second.
+     */
     public void removePlayer(ServerPlayer player) {
         UUID id = player.getUUID();
+        ServerPlayer tracked = players.get(id);
+        if (tracked != null && tracked != player) return;
         players.remove(id);
         syncedChunks.remove(id);
         awaitingKnownSet.remove(id);
         refreshRadius.remove(id);
+        knownChunksBudget.remove(id);
     }
 
     public void clear() {
@@ -59,6 +103,7 @@ public class PlayerTracker {
         syncedChunks.clear();
         awaitingKnownSet.clear();
         refreshRadius.clear();
+        knownChunksBudget.clear();
     }
 
     /**
@@ -88,6 +133,7 @@ public class PlayerTracker {
                 syncedChunks.remove(entry.getKey());
                 awaitingKnownSet.remove(entry.getKey());
                 refreshRadius.remove(entry.getKey());
+                knownChunksBudget.remove(entry.getKey());
                 removed++;
             } else if (live != entry.getValue()) {
                 entry.setValue(live);
@@ -124,6 +170,38 @@ public class PlayerTracker {
         if (!Config.DATA.rememberSentChunks) return;
         awaitingKnownSet.computeIfAbsent(uuid, k -> new ConcurrentHashMap<>())
             .put(dimensionId, System.currentTimeMillis());
+        // Entering a dimension is when an honest client uploads, so this is where its allowance
+        // is renewed. Nothing else renews it.
+        knownChunksBudget.computeIfAbsent(uuid, k -> new ConcurrentHashMap<>())
+            .put(dimensionId, 0);
+    }
+
+    /**
+     * Spends one packet of this player's known-chunks allowance for a dimension.
+     *
+     * @return false when the allowance is exhausted or the client already sent its final packet,
+     *         in which case the caller must ignore the payload
+     */
+    public boolean acceptKnownChunksPacket(UUID uuid, String dimensionId) {
+        Map<String, Integer> byDim = knownChunksBudget.computeIfAbsent(uuid, k -> new ConcurrentHashMap<>());
+        int spent = byDim.getOrDefault(dimensionId, 0);
+        if (spent == UPLOAD_FINISHED) return false; // already sent `last`; nothing more is expected
+        if (spent >= MAX_KNOWN_CHUNKS_PACKETS) {
+            // Close the budget so this logs once rather than once per packet.
+            byDim.put(dimensionId, UPLOAD_FINISHED);
+            VoxyWorldGenV2.LOGGER.warn(
+                "ignoring further known-chunks batches for {} from player {}: more than {} in one dimension entry",
+                dimensionId, uuid, MAX_KNOWN_CHUNKS_PACKETS);
+            return false;
+        }
+        byDim.put(dimensionId, spent + 1);
+        return true;
+    }
+
+    /** The client says it is done for this dimension; accept nothing further until it re-enters. */
+    public void finishKnownChunksUpload(UUID uuid, String dimensionId) {
+        knownChunksBudget.computeIfAbsent(uuid, k -> new ConcurrentHashMap<>())
+            .put(dimensionId, UPLOAD_FINISHED);
     }
 
     public void clearGate(UUID uuid, String dimensionId) {
