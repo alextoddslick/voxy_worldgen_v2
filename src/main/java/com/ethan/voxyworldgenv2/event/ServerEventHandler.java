@@ -52,6 +52,12 @@ public final class ServerEventHandler {
         // the first time a chunk is delivered, and a client that already has that version does not
         // need it again. Without this check every chunk load re-streams to every nearby player.
         //
+        // "Already holds" means synced AND not deferred. The worker's catch-up loop marks a whole
+        // batch synced before dispatching it, and any chunk of that batch that was not resident on
+        // the main thread was never actually sent -- it is recorded as deferred instead. Sending
+        // those here is the issue-#50 recovery this method has always provided; without it a
+        // pre-generated radius is claimed at join and that terrain never arrives at all.
+        //
         // Gated on rememberSentChunks: this is the feature's rollback switch, and a rollback that
         // only partly rolls back is worse than none. With it off, skip the store consultation
         // entirely and send to every nearby player on every load, exactly as before this task --
@@ -64,7 +70,12 @@ public final class ServerEventHandler {
             if (player.level() != level) continue;
             if (skipKnown) {
                 var store = PlayerTracker.getInstance().getStore(player.getUUID());
-                if (store != null && store.isSynced(dim, key)) continue;
+                if (store != null && store.isSynced(dim, key)) {
+                    if (!store.isDeferred(dim, key)) continue;
+                    // Claimed but never delivered: send it now and drop the claim's deferral, so
+                    // this recovery happens once rather than on every subsequent load.
+                    store.clearDeferred(dim, key);
+                }
             }
             NetworkHandler.sendLODData(player, chunk);
         }
