@@ -106,6 +106,56 @@ class SyncedChunkStoreTest {
         assertEquals(0, store.applyRegions(OVERWORLD, regions), "re-applying adds nothing new");
     }
 
+    /**
+     * The distinction the catch-up loop depends on: a pre-marked chunk that was never actually
+     * sent is synced (so the worker does not re-collect it) but deferred (so onChunkLoad still
+     * delivers it).
+     */
+    @Test
+    void deferredMarksAClaimedButUndeliveredChunk() {
+        SyncedChunkStore store = new SyncedChunkStore();
+        long pos = SyncedChunkStore.packChunk(-33, 40);
+
+        store.markSynced(OVERWORLD, pos);
+        assertFalse(store.isDeferred(OVERWORLD, pos), "a plain send is not deferred");
+
+        store.markDeferred(OVERWORLD, pos);
+        assertTrue(store.isSynced(OVERWORLD, pos), "still claimed, so the worker leaves it alone");
+        assertTrue(store.isDeferred(OVERWORLD, pos), "but not delivered, so onChunkLoad must send it");
+
+        store.clearDeferred(OVERWORLD, pos);
+        assertFalse(store.isDeferred(OVERWORLD, pos), "cleared on send, so it recovers once only");
+        assertTrue(store.isSynced(OVERWORLD, pos));
+    }
+
+    @Test
+    void deferredIsPerDimensionAndSafeOnUnknownDimensions() {
+        SyncedChunkStore store = new SyncedChunkStore();
+        long pos = SyncedChunkStore.packChunk(0, 0);
+
+        assertFalse(store.isDeferred("minecraft:the_end", pos), "unknown dimension reads as not deferred");
+        store.clearDeferred("minecraft:the_end", pos); // must not throw
+
+        store.markDeferred(OVERWORLD, pos);
+        assertTrue(store.isDeferred(OVERWORLD, pos));
+        assertFalse(store.isDeferred(NETHER, pos), "dimensions must not share deferral");
+
+        store.clearDeferred(NETHER, pos);
+        assertTrue(store.isDeferred(OVERWORLD, pos), "clearing one dimension must not clear another");
+    }
+
+    /** Deferral is a separate set, so nothing about it leaks into the synced view or its size. */
+    @Test
+    void deferringDoesNotChangeTheSyncedSet() {
+        SyncedChunkStore store = new SyncedChunkStore();
+        long pos = SyncedChunkStore.packChunk(7, -7);
+
+        store.markDeferred(OVERWORLD, pos);
+        assertFalse(store.isSynced(OVERWORLD, pos), "deferral alone does not claim a chunk");
+        assertEquals(0, store.size(OVERWORLD));
+        assertFalse(store.setFor(OVERWORLD).contains(pos));
+    }
+
     @Test
     void setForReturnsALiveViewUsableByTheCatchUpLoop() {
         SyncedChunkStore store = new SyncedChunkStore();

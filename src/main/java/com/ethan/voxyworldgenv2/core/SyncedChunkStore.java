@@ -23,6 +23,21 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class SyncedChunkStore {
     private final Map<String, LongSet> byDimension = new ConcurrentHashMap<>();
 
+    /**
+     * Chunks the worker claimed but could not actually deliver, because the chunk was not resident
+     * when the send reached the main thread.
+     *
+     * <p>The catch-up loop marks a whole batch synced on the worker thread before dispatching, so
+     * it does not re-collect the same unloaded chunks on every iteration. For a chunk that turns
+     * out not to be resident, that mark means "claimed", not "delivered" — nothing was sent. This
+     * set is what carries that distinction: {@code ServerEventHandler.onChunkLoad} treats a chunk
+     * that is synced-but-deferred as not synced and sends it when it loads, which is exactly the
+     * recovery the unconditional pre-branch onChunkLoad used to provide. Without it a
+     * pre-generated world loses that terrain permanently — the client never receives it, so it is
+     * not in next session's upload either.
+     */
+    private final Map<String, LongSet> deferredByDimension = new ConcurrentHashMap<>();
+
     public static long packChunk(int x, int z) {
         return ((long) x & 0xFFFFFFFFL) | (((long) z & 0xFFFFFFFFL) << 32);
     }
@@ -52,6 +67,24 @@ public final class SyncedChunkStore {
 
     public void markUnsynced(String dimensionId, long chunkPos) {
         LongSet set = byDimension.get(dimensionId);
+        if (set != null) set.remove(chunkPos);
+    }
+
+    /** Records that this chunk was marked synced without being sent. */
+    public void markDeferred(String dimensionId, long chunkPos) {
+        deferredByDimension.computeIfAbsent(dimensionId,
+            k -> LongSets.synchronize(new LongOpenHashSet())).add(chunkPos);
+    }
+
+    /** True while this chunk is claimed but undelivered, i.e. must still be sent when it loads. */
+    public boolean isDeferred(String dimensionId, long chunkPos) {
+        LongSet set = deferredByDimension.get(dimensionId);
+        return set != null && set.contains(chunkPos);
+    }
+
+    /** Called once the chunk has actually been handed to the send path. */
+    public void clearDeferred(String dimensionId, long chunkPos) {
+        LongSet set = deferredByDimension.get(dimensionId);
         if (set != null) set.remove(chunkPos);
     }
 
