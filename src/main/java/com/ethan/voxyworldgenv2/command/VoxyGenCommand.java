@@ -14,7 +14,10 @@ import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.commands.arguments.DimensionArgument;
+import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 
 /**
@@ -34,24 +37,32 @@ public final class VoxyGenCommand {
     private VoxyGenCommand() {}
 
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
+        // The root is visible to anyone who could use ANY subtree, so refresh can carry a
+        // configurable level of its own. Every pre-existing subtree keeps op level 2 explicitly.
         LiteralArgumentBuilder<CommandSourceStack> root = Commands.literal("voxygen")
-            .requires(src -> src.hasPermission(PERMISSION_OP));
+            .requires(src -> src.hasPermission(
+                Math.min(PERMISSION_OP, Math.max(0, Config.DATA.refreshPermissionLevel))));
 
-        root.then(buildStatus());
-        root.then(buildRadius());
-        root.then(buildTasks());
-        root.then(buildQueue());
-        root.then(buildEnabled());
-        root.then(buildRateLimit());
-        root.then(buildLogInterval());
-        root.then(buildSettings());
-        root.then(buildHeadless());
-        root.then(buildLog());
-        root.then(buildTraffic());
-        root.then(buildReload());
+        root.then(op(buildStatus()));
+        root.then(op(buildRadius()));
+        root.then(op(buildTasks()));
+        root.then(op(buildQueue()));
+        root.then(op(buildEnabled()));
+        root.then(op(buildRateLimit()));
+        root.then(op(buildLogInterval()));
+        root.then(op(buildSettings()));
+        root.then(op(buildHeadless()));
+        root.then(op(buildLog()));
+        root.then(op(buildTraffic()));
+        root.then(op(buildReload()));
+        root.then(buildRefresh());
         root.executes(VoxyGenCommand::status);
 
         dispatcher.register(root);
+    }
+
+    private static ArgumentBuilder<CommandSourceStack, ?> op(ArgumentBuilder<CommandSourceStack, ?> node) {
+        return node.requires(src -> src.hasPermission(PERMISSION_OP));
     }
 
     // ---- subtrees -------------------------------------------------------------------------
@@ -127,9 +138,50 @@ public final class VoxyGenCommand {
         return Commands.literal("reload").executes(VoxyGenCommand::reload);
     }
 
+    /** The re-send sweep is capped even for "all": collectCompletedInRange walks the distance
+     *  graph, and an unbounded radius would make that walk arbitrarily expensive on the worker. */
+    private static final int REFRESH_ALL_RADIUS = 512;
+
+    private static ArgumentBuilder<CommandSourceStack, ?> buildRefresh() {
+        return Commands.literal("refresh")
+            .requires(src -> src.hasPermission(Math.max(0, Config.DATA.refreshPermissionLevel)))
+            .executes(ctx -> refresh(ctx, Config.DATA.refreshDefaultRadius, false, null, null))
+            .then(refreshTarget(Commands.literal("near"), c -> Config.DATA.refreshDefaultRadius, false))
+            .then(refreshTarget(Commands.literal("all"), c -> REFRESH_ALL_RADIUS, true))
+            .then(refreshTarget(Commands.argument("chunks", IntegerArgumentType.integer(1, 512)),
+                c -> IntegerArgumentType.getInteger(c, "chunks"), false));
+    }
+
+    /**
+     * Attaches the shared [player [dimension]] tail to one radius node.
+     *
+     * <p>{@code all} is passed explicitly rather than inferred from the radius. Inferring it
+     * would make the literal `/voxygen refresh 512` silently mean "forget the whole dimension",
+     * which is a different operation that happens to share a number.
+     */
+    private static ArgumentBuilder<CommandSourceStack, ?> refreshTarget(
+            ArgumentBuilder<CommandSourceStack, ?> node,
+            java.util.function.Function<CommandContext<CommandSourceStack>, Integer> radius,
+            boolean all) {
+        return node
+            .executes(ctx -> refresh(ctx, radius.apply(ctx), all, null, null))
+            .then(Commands.argument("player", EntityArgument.player())
+                .requires(src -> src.hasPermission(PERMISSION_OP))
+                .executes(ctx -> refresh(ctx, radius.apply(ctx), all,
+                    EntityArgument.getPlayer(ctx, "player"), null))
+                .then(Commands.argument("dimension", DimensionArgument.dimension())
+                    .executes(ctx -> refresh(ctx, radius.apply(ctx), all,
+                        EntityArgument.getPlayer(ctx, "player"),
+                        DimensionArgument.getDimension(ctx, "dimension")))));
+    }
+
     // ---- handlers -------------------------------------------------------------------------
 
     private static int status(CommandContext<CommandSourceStack> ctx) {
+        if (!ctx.getSource().hasPermission(PERMISSION_OP)) {
+            reply(ctx, "usage: /voxygen refresh <near|chunks|all>");
+            return 0;
+        }
         var mgr = ChunkGenerationManager.getInstance();
         var stats = mgr.getStats();
         var q = LodSendQueue.getInstance();
@@ -263,6 +315,50 @@ public final class VoxyGenCommand {
     private static int reload(CommandContext<CommandSourceStack> ctx) {
         ChunkGenerationManager.getInstance().scheduleConfigReload();
         reply(ctx, "config reload scheduled (re-reads config/voxyworldgenv2.json next tick)");
+        return 1;
+    }
+
+    /**
+     * Clears synced bits so the worker's catch-up loop re-sends them. Deliberately sends nothing
+     * itself and never queues ungenerated chunks: "all" forgets the whole dimension but the
+     * re-send sweep is still capped at REFRESH_ALL_RADIUS, and the rest arrives as the player
+     * travels. The reply states the effective radius so that is never a surprise.
+     */
+    private static int refresh(CommandContext<CommandSourceStack> ctx, int radius, boolean all,
+                               ServerPlayer explicitTarget, ServerLevel explicitDimension) {
+        ServerPlayer target = explicitTarget;
+        if (target == null) {
+            if (!(ctx.getSource().getEntity() instanceof ServerPlayer self)) {
+                reply(ctx, "console has no position; name a player: /voxygen refresh all <player>");
+                return 0;
+            }
+            target = self;
+        }
+
+        ServerLevel level = explicitDimension != null ? explicitDimension : (ServerLevel) target.level();
+        String dim = PlayerTracker.dimensionId(level.dimension());
+
+        var store = PlayerTracker.getInstance().getStore(target.getUUID());
+        if (store == null) {
+            reply(ctx, "§c" + target.getName().getString() + " is not tracked yet; try again in a moment");
+            return 0;
+        }
+
+        int forgotten = all
+            ? store.forgetAll(dim)
+            : store.forgetWithin(dim, target.chunkPosition().x, target.chunkPosition().z, radius);
+
+        PlayerTracker.getInstance().setRefreshRadius(target.getUUID(), dim, radius);
+
+        reply(ctx, String.format("forgot §b%d§r chunk(s) for §b%s§r in §b%s§r; re-sending within §b%d§r chunks",
+            forgotten, target.getName().getString(), dim, radius));
+        if (all) {
+            reply(ctx, "§7 \"all\" forgets the whole dimension; anything beyond "
+                + REFRESH_ALL_RADIUS + " chunks arrives as they travel");
+        }
+        if (forgotten == 0) {
+            reply(ctx, "§7 nothing was remembered there, so nothing will be re-sent");
+        }
         return 1;
     }
 
