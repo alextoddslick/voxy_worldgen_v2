@@ -256,13 +256,16 @@ public final class ChunkGenerationManager {
                             final ServerLevel level = ds.level;
                             final UUID playerUUID = player.getUUID();
                             // mark all as synced now so we don't retry unloaded chunks in a tight loop;
-                            // the block update mixin will re-sync them when they load naturally
+                            // chunks that turn out not to be resident are additionally recorded as
+                            // deferred below, which is what makes this mark mean "claimed" rather
+                            // than "delivered" and lets onChunkLoad still send them.
                             for (ChunkPos syncPos : finalSyncBatch) {
                                 synced.add(syncPos.toLong());
                             }
                             server.execute(() -> {
                                 ServerPlayer p = server.getPlayerList().getPlayer(playerUUID);
                                 if (p != null) {
+                                    var store = PlayerTracker.getInstance().getStore(playerUUID);
                                     for (ChunkPos syncPos : finalSyncBatch) {
                                         // getChunkNow, not getChunk(x, z, false): the false only skips adding a
                                         // ticket, it does NOT make the call non-blocking. Under C2ME a holder can
@@ -272,9 +275,15 @@ public final class ChunkGenerationManager {
                                         LevelChunk c = level.getChunkSource().getChunkNow(syncPos.x, syncPos.z);
                                         if (c != null) {
                                             com.ethan.voxyworldgenv2.network.NetworkHandler.sendLODData(p, c);
+                                        } else if (store != null && Config.DATA.rememberSentChunks) {
+                                            // Not resident, so nothing was sent even though the batch was
+                                            // pre-marked synced. Record it as deferred so onChunkLoad delivers
+                                            // it when the player walks into it -- otherwise a pre-generated
+                                            // radius is claimed on join and never actually arrives.
+                                            // (Only tracked when the feature is on: with rememberSentChunks
+                                            // off, onChunkLoad already sends unconditionally.)
+                                            store.markDeferred(dimId, syncPos.toLong());
                                         }
-                                        // if c == null the chunk is not loaded; the BlockUpdateMixin will
-                                        // handle syncing it when it gets loaded into memory later
                                     }
                                 }
                             });
