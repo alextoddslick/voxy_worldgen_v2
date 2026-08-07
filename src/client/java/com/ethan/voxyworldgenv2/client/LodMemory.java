@@ -1,6 +1,7 @@
 package com.ethan.voxyworldgenv2.client;
 
 import com.ethan.voxyworldgenv2.VoxyWorldGenV2;
+import com.ethan.voxyworldgenv2.core.MinecraftServerExtension;
 import com.ethan.voxyworldgenv2.network.NetworkHandler;
 import com.ethan.voxyworldgenv2.network.NetworkState;
 import com.ethan.voxyworldgenv2.network.RegionBitmask;
@@ -12,7 +13,6 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.storage.LevelResource;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -241,20 +241,35 @@ public final class LodMemory {
      * different saves can both be called "New World". Keying on the display name would give them
      * one shared memory file and make world B upload world A's known set.
      *
-     * <p>{@code MinecraftServer.storageSource} is protected, so the level id is read through the
-     * public {@code getWorldPath}. Verified against the Mojang-mapped 1.21.1 jar:
-     * {@code getWorldPath(r)} is {@code storageSource.getLevelPath(r)} =
-     * {@code levelDirectory.path().resolve(r.getId())}, and {@code LevelResource.ROOT}'s id is
-     * {@code "."} — hence the {@code normalize()}, without which the last path element is ".".
-     * {@code LevelStorageAccess.getLevelId()} is that same directory name.
+     * <p>This runs on the client thread while the integrated server thread runs independently, so
+     * it must not call {@code MinecraftServer.getWorldPath(LevelResource)}. Verified against the
+     * Mojang-mapped 1.21.1 jar: {@code getWorldPath(r)} is {@code storageSource.getLevelPath(r)},
+     * which is {@code resources.computeIfAbsent(r, levelDirectory::resourcePath)} over a
+     * {@code Maps.newHashMap()} — a plain, unsynchronised {@link java.util.HashMap}. The server
+     * thread populates that same map lazily (PLAYER_STATS_DIR and PLAYER_ADVANCEMENTS_DIR are
+     * resolved on player join, which is exactly when this first runs), and two threads inside one
+     * {@code HashMap.computeIfAbsent} can corrupt a bucket chain and leave a thread spinning. That
+     * is not a lost-key race that costs at most a cache entry — it is the failure class that has
+     * already taken this project down once (see HANDOFF.md on BetterEnd's
+     * {@code MountainPiece.heightmap}: a spin inside {@code HashMap.resize}, then the 60-second
+     * watchdog).
+     *
+     * <p>So the id is read straight off {@code MinecraftServer.storageSource} (reached with an
+     * {@code @Accessor} because the field is {@code protected}) via
+     * {@code LevelStorageAccess.getLevelId()}, whose bytecode is a single {@code getfield} of the
+     * {@code private final String levelId} — no map, no allocation, no mutation. Both that field
+     * and {@code storageSource} are final and assigned in their constructors, so the cross-thread
+     * read is safely published.
+     *
+     * <p>The value is unchanged from the previous {@code getWorldPath(ROOT).normalize()} result:
+     * {@code LevelStorageAccess} is built as {@code new LevelStorageAccess(src, levelId,
+     * baseDir.resolve(levelId))}, so {@code getLevelId()} is exactly the save directory's name.
      */
     private static String singleplayerLevelId(Minecraft client) {
         var integrated = client.getSingleplayerServer();
         if (integrated == null) return null;
         try {
-            Path root = integrated.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
-            Path name = root.getFileName();
-            return name == null ? null : name.toString();
+            return ((MinecraftServerExtension) integrated).voxyworldgen$storageSource().getLevelId();
         } catch (Exception e) {
             VoxyWorldGenV2.LOGGER.warn("could not read the singleplayer level id: {}", e.toString());
             return null;
