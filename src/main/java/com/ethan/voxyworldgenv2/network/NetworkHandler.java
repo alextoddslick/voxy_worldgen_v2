@@ -275,6 +275,16 @@ public class NetworkHandler {
         }
     }
 
+    /**
+     * Enforced at the one point every send path passes through, so block-update pushes cannot leak
+     * through the join window. A gated send is dropped, not queued, and the chunk is left unsynced
+     * so the catch-up path collects it once the gate lifts.
+     */
+    private static boolean gated(ServerPlayer player, ResourceKey<Level> dimension) {
+        return PlayerTracker.getInstance()
+            .isGated(player.getUUID(), PlayerTracker.dimensionId(dimension));
+    }
+
     public static void broadcastLODData(LevelChunk chunk) {
         ChunkPos pos = chunk.getPos();
         int minY = chunk.getMinSection();
@@ -295,6 +305,11 @@ public class NetworkHandler {
                 continue;
             }
 
+            if (gated(player, dimension)) {
+                setSyncedState(player, dimension, pos, false);
+                continue;
+            }
+
             boolean accepted = LodSendQueue.getInstance().enqueue(
                 player, dimension, pos, minY, sections, registryAccess);
             // Mirror the enqueue result into the synced set: accepted chunks won't be re-sent by
@@ -310,6 +325,11 @@ public class NetworkHandler {
         List<LodSendQueue.PendingSection> sections = snapshotSections(chunk);
 
         if (sections.isEmpty()) {
+            setSyncedState(player, dimension, pos, false);
+            return;
+        }
+
+        if (gated(player, dimension)) {
             setSyncedState(player, dimension, pos, false);
             return;
         }

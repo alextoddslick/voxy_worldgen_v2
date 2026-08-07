@@ -22,6 +22,12 @@ public class PlayerTracker {
     private final Map<UUID, ServerPlayer> players;
     private final Map<UUID, SyncedChunkStore> syncedChunks;
 
+    /**
+     * When a player entered a dimension and has not yet uploaded what they already have.
+     * Keyed UUID -> dimension id -> millis at which the wait started.
+     */
+    private final Map<UUID, Map<String, Long>> awaitingKnownSet = new ConcurrentHashMap<>();
+
     private PlayerTracker() {
         this.players = new ConcurrentHashMap<>();
         this.syncedChunks = new ConcurrentHashMap<>();
@@ -41,11 +47,13 @@ public class PlayerTracker {
         UUID id = player.getUUID();
         players.remove(id);
         syncedChunks.remove(id);
+        awaitingKnownSet.remove(id);
     }
 
     public void clear() {
         players.clear();
         syncedChunks.clear();
+        awaitingKnownSet.clear();
     }
 
     /**
@@ -73,6 +81,7 @@ public class PlayerTracker {
             if (live == null || live.hasDisconnected()) {
                 it.remove();
                 syncedChunks.remove(entry.getKey());
+                awaitingKnownSet.remove(entry.getKey());
                 removed++;
             } else if (live != entry.getValue()) {
                 entry.setValue(live);
@@ -89,8 +98,36 @@ public class PlayerTracker {
         return syncedChunks.get(uuid);
     }
 
-    /** Filled in by the join-gate work; a no-op until then. */
-    public void clearGate(java.util.UUID uuid, String dimensionId) {}
+    public void armGate(UUID uuid, String dimensionId) {
+        if (!Config.DATA.rememberSentChunks) return;
+        awaitingKnownSet.computeIfAbsent(uuid, k -> new ConcurrentHashMap<>())
+            .put(dimensionId, System.currentTimeMillis());
+    }
+
+    public void clearGate(UUID uuid, String dimensionId) {
+        Map<String, Long> byDim = awaitingKnownSet.get(uuid);
+        if (byDim != null) byDim.remove(dimensionId);
+    }
+
+    /**
+     * True while we are still waiting for this player's known-chunk upload for this dimension.
+     *
+     * <p>Without this the worker starts re-streaming during the second the upload is in flight,
+     * which is exactly the traffic the feature exists to avoid. The timeout is what makes a
+     * vanilla or older client — which never uploads — behave as it did before.
+     */
+    public boolean isGated(UUID uuid, String dimensionId) {
+        if (!Config.DATA.rememberSentChunks) return false;
+        Map<String, Long> byDim = awaitingKnownSet.get(uuid);
+        if (byDim == null) return false;
+        Long since = byDim.get(dimensionId);
+        if (since == null) return false;
+        if (System.currentTimeMillis() - since > Config.DATA.knownChunksTimeoutSeconds * 1000L) {
+            byDim.remove(dimensionId);
+            return false;
+        }
+        return true;
+    }
 
     public it.unimi.dsi.fastutil.longs.LongSet getSyncedChunks(
             java.util.UUID uuid, net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension) {

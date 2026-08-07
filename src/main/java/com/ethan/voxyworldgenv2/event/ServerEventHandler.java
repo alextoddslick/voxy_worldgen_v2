@@ -26,8 +26,11 @@ public final class ServerEventHandler {
     }
     
     public static void onPlayerJoin(ServerGamePacketListenerImpl handler, PacketSender sender, MinecraftServer server) {
-        PlayerTracker.getInstance().addPlayer(handler.getPlayer());
-        com.ethan.voxyworldgenv2.network.NetworkHandler.sendHandshake(handler.getPlayer());
+        ServerPlayer player = handler.getPlayer();
+        PlayerTracker.getInstance().addPlayer(player);
+        PlayerTracker.getInstance().armGate(player.getUUID(),
+            PlayerTracker.dimensionId(player.level().dimension()));
+        NetworkHandler.sendHandshake(player);
     }
     
     public static void onPlayerDisconnect(ServerGamePacketListenerImpl handler, MinecraftServer server) {
@@ -43,10 +46,17 @@ public final class ServerEventHandler {
         // neighbor context (fixes hard snow/biome blend edges on new worlds, issue #40).
         // also handles syncing pre-generated chunks that couldn't be sent at generation
         // time because the player wasn't loaded yet (issue #50).
+        //
+        // Skipped for a player who already holds the chunk: the issue-#40 re-send still happens
+        // the first time a chunk is delivered, and a client that already has that version does not
+        // need it again. Without this check every chunk load re-streams to every nearby player.
+        String dim = PlayerTracker.dimensionId(level.dimension());
+        long key = chunk.getPos().toLong();
         for (ServerPlayer player : PlayerTracker.getInstance().getPlayers()) {
-            if (player.level() == level) {
-                NetworkHandler.sendLODData(player, chunk);
-            }
+            if (player.level() != level) continue;
+            var store = PlayerTracker.getInstance().getStore(player.getUUID());
+            if (store != null && store.isSynced(dim, key)) continue;
+            NetworkHandler.sendLODData(player, chunk);
         }
     }
 }

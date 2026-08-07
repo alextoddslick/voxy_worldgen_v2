@@ -510,6 +510,8 @@ public final class ChunkGenerationManager {
             ResourceKey<Level> currentLevelKey = player.level().dimension();
             ResourceKey<Level> lastLevelKey = lastPlayerLevels.put(player.getUUID(), currentLevelKey);
             if (!currentLevelKey.equals(lastLevelKey)) {
+                PlayerTracker.getInstance().armGate(player.getUUID(),
+                    PlayerTracker.dimensionId(currentLevelKey));
                 pauseForTransition(player.getName().getString(), currentLevelKey, lastLevelKey == null);
             }
         }
