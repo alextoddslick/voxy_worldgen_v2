@@ -152,7 +152,13 @@ public final class RegionBitmask {
         try {
             inflater.setInput(payload);
             int n = inflater.inflate(raw);
-            if (n != rawLength) throw new IOException("short inflate: " + n + " != " + rawLength);
+            // Checking n != rawLength alone only catches output SHORTER than declared. If
+            // rawLength is understated, inflate() fills the undersized buffer exactly (n ==
+            // rawLength) while more inflated bytes remain unconsumed — inflater.finished() is
+            // what catches that case, mirroring the !deflater.finished() guard in deflate().
+            if (n != rawLength || !inflater.finished()) {
+                throw new IOException("short inflate: " + n + " != " + rawLength);
+            }
             return raw;
         } catch (DataFormatException e) {
             throw new IOException("corrupt known-chunks packet", e);
