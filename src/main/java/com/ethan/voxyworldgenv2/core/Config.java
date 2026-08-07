@@ -76,5 +76,9 @@ public final class Config {
         // Player UUIDs who opted out of the auto-opening settings book (/voxygen headless on).
         // They keep the chat replies; /voxygen settings still opens the book on request.
         public java.util.List<String> headlessPlayers = new java.util.ArrayList<>();
+        // Master switch for client LOD memory. When false the server ignores uploaded known-chunk
+        // sets and re-streams everything, exactly as it did before that feature existed. This is
+        // the rollback: the failure mode of remembering wrongly is invisible terrain.
+        public boolean rememberSentChunks = true;
     }
 }
