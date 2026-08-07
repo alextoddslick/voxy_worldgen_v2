@@ -50,6 +50,7 @@ public class NetworkClientHandler {
         }
         NetworkState.incrementReceived(bytes);
 
+        boolean anyIngested = false;
         for (NetworkHandler.LODDataPayload.SectionData sectionData : payload.sections()) {
             io.netty.buffer.ByteBuf statesRaw = io.netty.buffer.Unpooled.wrappedBuffer(sectionData.states());
             io.netty.buffer.ByteBuf biomesRaw = io.netty.buffer.Unpooled.wrappedBuffer(sectionData.biomes());
@@ -76,13 +77,20 @@ public class NetworkClientHandler {
                 DataLayer sl = sectionData.skyLight() != null ? new DataLayer(sectionData.skyLight()) : null;
                 
                 VoxyIntegration.rawIngest(level, section, payload.pos().x, sectionData.y(), payload.pos().z, bl, sl);
-                
+                anyIngested = true;
+
             } catch (Exception e) {
                 VoxyWorldGenV2.LOGGER.error("failed to handle LOD data for chunk " + payload.pos(), e);
             } finally {
                 statesRaw.release();
                 biomesRaw.release();
             }
+        }
+
+        // Record only what actually reached Voxy: the memory must mean "Voxy has this", not
+        // "a packet arrived", or the server will skip chunks that never made it in.
+        if (anyIngested) {
+            com.ethan.voxyworldgenv2.client.LodMemory.record(payload.pos().x, payload.pos().z);
         }
     }
 }
