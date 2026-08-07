@@ -80,5 +80,9 @@ public final class Config {
         // sets and re-streams everything, exactly as it did before that feature existed. This is
         // the rollback: the failure mode of remembering wrongly is invisible terrain.
         public boolean rememberSentChunks = true;
+        // How long to withhold LOD data from a joining player while waiting for their client to
+        // upload what it already has. A vanilla or older client never uploads, so this timeout is
+        // what makes it behave exactly as it did before the feature existed. 0 disables the gate.
+        public int knownChunksTimeoutSeconds = 10;
     }
 }
