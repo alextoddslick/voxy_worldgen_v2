@@ -82,7 +82,12 @@ public class NetworkClientHandler {
                 DataLayer bl = sectionData.blockLight() != null ? new DataLayer(sectionData.blockLight()) : null;
                 DataLayer sl = sectionData.skyLight() != null ? new DataLayer(sectionData.skyLight()) : null;
                 
-                VoxyIntegration.rawIngest(level, section, payload.pos().x, sectionData.y(), payload.pos().z, bl, sl);
+                // AND, not assignment: one section that voxy did not take is enough to disqualify
+                // the whole column. rawIngest reports false for a failed invoke AND for the case
+                // where its reflected handles could not be resolved at all, which is otherwise a
+                // silent no-op that would still get recorded as "voxy has this".
+                allIngested &= VoxyIntegration.rawIngest(
+                    level, section, payload.pos().x, sectionData.y(), payload.pos().z, bl, sl);
 
             } catch (Exception e) {
                 VoxyWorldGenV2.LOGGER.error("failed to handle LOD data for chunk " + payload.pos(), e);

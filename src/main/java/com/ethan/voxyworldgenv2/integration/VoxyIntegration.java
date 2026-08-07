@@ -27,6 +27,9 @@ public final class VoxyIntegration {
     private static MethodHandle voxyEnabledInstanceHandle;
     private static MethodHandle voxyConfigSingletonGetter;
 
+    /** So a permanently unresolvable rawIngest is reported once, not once per section. */
+    private static boolean rawIngestUnavailableLogged = false;
+
     private VoxyIntegration() {}
 
     private static void initialize() {
@@ -220,22 +223,51 @@ public final class VoxyIntegration {
         }
     }
     
-    public static void rawIngest(net.minecraft.world.level.Level level, net.minecraft.world.level.chunk.LevelChunkSection section, int cx, int cy, int cz, net.minecraft.world.level.chunk.DataLayer blockLight, net.minecraft.world.level.chunk.DataLayer skyLight) {
+    /**
+     * Pushes one section into Voxy.
+     *
+     * <p>Returns whether the section actually reached Voxy, because the client's LOD memory records
+     * "Voxy has this" and a record that only means "a packet arrived" is a false positive the player
+     * can never recover from: the server is told the chunk is held and stops sending it, so the
+     * terrain stays blank with nothing logged. Every failure path therefore reports {@code false} —
+     * the reflection handles being absent (a Voxy update that changes the signature), a null world
+     * identifier, and any throwable out of the invoke — and only a completed invoke reports
+     * {@code true}. Failing this way costs at most a redundant re-send.
+     */
+    public static boolean rawIngest(net.minecraft.world.level.Level level, net.minecraft.world.level.chunk.LevelChunkSection section, int cx, int cy, int cz, net.minecraft.world.level.chunk.DataLayer blockLight, net.minecraft.world.level.chunk.DataLayer skyLight) {
         if (!initialized) initialize();
-        if (rawIngestMethod == null || worldIdentifierOfMethod == null) return;
+        if (rawIngestMethod == null || worldIdentifierOfMethod == null) {
+            warnRawIngestUnavailableOnce();
+            return false;
+        }
 
         try {
             Object worldId = worldIdentifierOfMethod.invoke(level);
-            if (worldId == null) return;
-            
+            if (worldId == null) return false;
+
             rawIngestMethod.invoke(worldId, section, cx, cy, cz, blockLight, skyLight);
+            return true;
         } catch (Throwable e) {
             VoxyWorldGenV2.LOGGER.error("failed to raw ingest section", e);
+            return false;
         }
     }
 
-    public static void rawIngest(net.minecraft.world.level.Level level, net.minecraft.world.level.chunk.LevelChunkSection section, int cx, int cy, int cz, net.minecraft.world.level.chunk.DataLayer skyLight) {
-        rawIngest(level, section, cx, cy, cz, null, skyLight);
+    public static boolean rawIngest(net.minecraft.world.level.Level level, net.minecraft.world.level.chunk.LevelChunkSection section, int cx, int cy, int cz, net.minecraft.world.level.chunk.DataLayer skyLight) {
+        return rawIngest(level, section, cx, cy, cz, null, skyLight);
+    }
+
+    /**
+     * One line, once per process. Without it a Voxy version whose {@code rawIngest} we can no longer
+     * resolve turns every LOD packet into a silent no-op, and the only symptom is missing terrain.
+     */
+    private static void warnRawIngestUnavailableOnce() {
+        if (rawIngestUnavailableLogged) return;
+        rawIngestUnavailableLogged = true;
+        VoxyWorldGenV2.LOGGER.warn(
+            "voxy rawIngest is unavailable (rawIngest resolved: {}, WorldIdentifier.of resolved: {}); "
+                + "incoming LOD data cannot be handed to voxy and will not be remembered",
+            rawIngestMethod != null, worldIdentifierOfMethod != null);
     }
 
     public static boolean isVoxyAvailable() {
