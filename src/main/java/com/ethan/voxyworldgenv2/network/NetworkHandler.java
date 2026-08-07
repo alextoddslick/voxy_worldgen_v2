@@ -26,6 +26,14 @@ import java.util.List;
 public class NetworkHandler {
     public static final Identifier HANDSHAKE_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":handshake");
     public static final Identifier LOD_DATA_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":lod_data");
+    public static final Identifier KNOWN_CHUNKS_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":known_chunks");
+
+    /**
+     * Bumped whenever the payload wire format changes. The client refuses to upload its known-chunk
+     * set unless the server advertises at least 2, because sending a payload a server has not
+     * registered can drop the connection.
+     */
+    public static final int PROTOCOL_VERSION = 2;
 
     // Keep individual packets well under the protocol ceiling to prevent connection resets on
     // public servers. The binding limit for a clientbound custom payload in 1.21.1 is
@@ -33,16 +41,17 @@ public class NetworkHandler {
     // length cap, which is a separate, larger limit) -- so this leaves 32x headroom.
     static final int MAX_PACKET_BYTES = 32_768;
 
-    public record HandshakePayload(boolean serverHasMod) implements CustomPacketPayload {
+    public record HandshakePayload(boolean serverHasMod, int protocolVersion) implements CustomPacketPayload {
         public static final Type<HandshakePayload> TYPE = new Type<>(HANDSHAKE_ID);
         public static final StreamCodec<FriendlyByteBuf, HandshakePayload> CODEC = CustomPacketPayload.codec(HandshakePayload::write, HandshakePayload::new);
 
         public HandshakePayload(FriendlyByteBuf buf) {
-            this(buf.readBoolean());
+            this(buf.readBoolean(), buf.readVarInt());
         }
 
         public void write(FriendlyByteBuf buf) {
             buf.writeBoolean(this.serverHasMod);
+            buf.writeVarInt(this.protocolVersion);
         }
 
         @Override
@@ -173,13 +182,85 @@ public class NetworkHandler {
         }
     }
 
+    /**
+     * One batch of the client's "chunks I already have" set, as region bitmasks produced by
+     * {@link RegionBitmask}. Several are sent per dimension; the final one carries {@code last}.
+     */
+    public record KnownChunksPayload(ResourceKey<Level> dimension, boolean last, byte[] body) implements CustomPacketPayload {
+        public static final Type<KnownChunksPayload> TYPE = new Type<>(KNOWN_CHUNKS_ID);
+        public static final StreamCodec<FriendlyByteBuf, KnownChunksPayload> CODEC =
+            CustomPacketPayload.codec(KnownChunksPayload::write, KnownChunksPayload::new);
+
+        public KnownChunksPayload(FriendlyByteBuf buf) {
+            this(
+                ResourceKey.create(Registries.DIMENSION, ResourceLocation.parse(buf.readUtf())),
+                buf.readBoolean(),
+                buf.readByteArray(MAX_PACKET_BYTES)
+            );
+        }
+
+        public void write(FriendlyByteBuf buf) {
+            buf.writeUtf(dimension.location().toString());
+            buf.writeBoolean(last);
+            buf.writeByteArray(body);
+        }
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
     public static void init() {
         PayloadTypeRegistry.serverboundPlay().register(HandshakePayload.TYPE, HandshakePayload.CODEC);
         PayloadTypeRegistry.clientboundPlay().register(HandshakePayload.TYPE, HandshakePayload.CODEC);
-        
+
         PayloadTypeRegistry.clientboundPlay().register(LODDataPayload.TYPE, LODDataPayload.CODEC);
-        
-        VoxyWorldGenV2.LOGGER.info("voxy networking initialized");
+        PayloadTypeRegistry.serverboundPlay().register(KnownChunksPayload.TYPE, KnownChunksPayload.CODEC);
+
+        ServerPlayNetworking.registerGlobalReceiver(KnownChunksPayload.TYPE,
+            (payload, context) -> receiveKnownChunks(context.player(), payload));
+
+        VoxyWorldGenV2.LOGGER.info("voxy networking initialized (protocol {})", PROTOCOL_VERSION);
+    }
+
+    /**
+     * Seeds a player's synced set from what their client says Voxy already holds.
+     *
+     * <p>Applied on the handler thread rather than off-thread: packets must be merged in arrival
+     * order, and the cost is bounded — a 64-chunk radius is ~16k inserts (sub-millisecond). A
+     * 512-chunk radius is ~1M inserts and costs roughly 100ms once per join, which the timing warn
+     * below surfaces. That is three orders of magnitude short of the 60s watchdog.
+     */
+    private static void receiveKnownChunks(ServerPlayer player, KnownChunksPayload payload) {
+        if (!com.ethan.voxyworldgenv2.core.Config.DATA.rememberSentChunks) return;
+
+        var tracker = PlayerTracker.getInstance();
+        var store = tracker.getStore(player.getUUID());
+        if (store == null) return;
+
+        String dim = PlayerTracker.dimensionId(payload.dimension());
+        long startedNs = System.nanoTime();
+        int added;
+        try {
+            added = store.applyRegions(dim, RegionBitmask.decode(payload.body()));
+        } catch (Exception e) {
+            VoxyWorldGenV2.LOGGER.warn("discarding malformed known-chunks batch from {}: {}",
+                player.getName().getString(), e.toString());
+            return;
+        }
+
+        long millis = (System.nanoTime() - startedNs) / 1_000_000L;
+        if (millis > 50) {
+            VoxyWorldGenV2.LOGGER.warn("applying known chunks for {} took {}ms ({} chunks)",
+                player.getName().getString(), millis, added);
+        }
+
+        if (payload.last()) {
+            tracker.clearGate(player.getUUID(), dim);
+            VoxyWorldGenV2.LOGGER.info("{} reports {} known chunks in {}; skipping re-send",
+                player.getName().getString(), store.size(dim), dim);
+        }
     }
 
     private static void setSyncedState(ServerPlayer player, ResourceKey<Level> dimension,
@@ -291,6 +372,6 @@ public class NetworkHandler {
     }
 
     public static void sendHandshake(ServerPlayer player) {
-        ServerPlayNetworking.send(player, new HandshakePayload(true));
+        ServerPlayNetworking.send(player, new HandshakePayload(true, PROTOCOL_VERSION));
     }
 }

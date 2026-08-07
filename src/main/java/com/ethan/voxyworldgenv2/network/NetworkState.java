@@ -4,12 +4,13 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class NetworkState {
     private static boolean serverConnected = false;
+    private static volatile int serverProtocol = 0;
     private static final AtomicLong chunksReceived = new AtomicLong(0);
     private static final AtomicLong bytesReceived = new AtomicLong(0);
-    
+
     private static double receiveRate = 0; // chunks/s
     private static double bandwidthRate = 0; // bytes/s
-    
+
     private static long lastUpdateTime = 0;
     private static long lastChunkCount = 0;
     private static long lastByteCount = 0;
@@ -24,11 +25,25 @@ public class NetworkState {
             lastUpdateTime = 0;
             lastChunkCount = 0;
             lastByteCount = 0;
+            serverProtocol = 0;
         }
     }
 
     public static boolean isServerConnected() {
         return serverConnected;
+    }
+
+    public static void setServerProtocol(int version) {
+        serverProtocol = version;
+    }
+
+    public static int getServerProtocol() {
+        return serverProtocol;
+    }
+
+    /** The server registered the known-chunks payload, so sending it will not drop the connection. */
+    public static boolean supportsKnownChunks() {
+        return serverConnected && serverProtocol >= 2;
     }
 
     public static void incrementReceived(long bytes) {
