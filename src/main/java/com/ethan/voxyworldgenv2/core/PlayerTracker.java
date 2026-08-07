@@ -118,6 +118,7 @@ public class PlayerTracker {
      */
     public boolean isGated(UUID uuid, String dimensionId) {
         if (!Config.DATA.rememberSentChunks) return false;
+        if (Config.DATA.knownChunksTimeoutSeconds <= 0) return false;
         Map<String, Long> byDim = awaitingKnownSet.get(uuid);
         if (byDim == null) return false;
         Long since = byDim.get(dimensionId);
