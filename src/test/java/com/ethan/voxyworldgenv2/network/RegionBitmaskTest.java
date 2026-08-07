@@ -3,6 +3,7 @@ package com.ethan.voxyworldgenv2.network;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -10,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.zip.Deflater;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -101,11 +103,14 @@ class RegionBitmaskTest {
 
     @Test
     void everyPacketStaysUnderTheProtocolCeiling() {
+        // Repeated 0xFF is the EASIEST case for Deflate, not the worst — random bytes are
+        // genuinely incompressible, forcing the stored fallback at full batch size, which is
+        // the actual worst case the MAX_REGIONS_PER_PACKET arithmetic needs to survive.
+        Random rng = new Random(9001L);
         Map<Long, byte[]> regions = new HashMap<>();
         for (int i = 0; i < 1000; i++) {
             byte[] mask = new byte[RegionBitmask.MASK_BYTES];
-            // fill completely: worst case for compression
-            java.util.Arrays.fill(mask, (byte) 0xFF);
+            rng.nextBytes(mask);
             regions.put(RegionBitmask.regionKey(i * 32, 0), mask);
         }
         for (byte[] packet : RegionBitmask.encode(regions)) {
@@ -145,6 +150,68 @@ class RegionBitmaskTest {
 
         Map<Long, byte[]> out = RegionBitmask.decode(RegionBitmask.encode(regions).get(0));
         assertArrayEquals(noise, out.get(RegionBitmask.regionKey(0, 0)));
+    }
+
+    @Test
+    void decodeRejectsCorruptTruncatedAndDisagreeingRawLength() throws IOException {
+        // decode() is the higher-consequence path — it drives what a live server believes
+        // a connected player already holds — so malformed input here must always raise
+        // IOException, never succeed with wrong data and never throw unchecked.
+        //
+        // Highly compressible payload so encode() takes the deflate path rather than the
+        // stored fallback: corrupting a *compressed* stream is what this test needs to
+        // exercise, since the stored path has no inflate() step to get wrong.
+        Map<Long, byte[]> regions = new HashMap<>();
+        for (int i = 0; i < 50; i++) {
+            regions.put(RegionBitmask.regionKey(i * 32, 0), new byte[RegionBitmask.MASK_BYTES]);
+        }
+        byte[] good = RegionBitmask.encode(regions).get(0);
+        int rawLength = ByteBuffer.wrap(good).getInt();
+        int payloadLength = good.length - 4;
+        assertTrue(payloadLength < rawLength, "test setup expects the deflate path, not stored");
+
+        // Bit-flipped/garbage compressed payload: corrupt the zlib header byte so the
+        // Inflater fails its header check.
+        byte[] garbage = good.clone();
+        garbage[4] ^= 0xFF;
+        assertThrows(IOException.class, () -> RegionBitmask.decode(garbage));
+
+        // Truncated packet body: chop the compressed payload in half so it cannot possibly
+        // hold a complete deflate stream.
+        byte[] truncated = java.util.Arrays.copyOf(good, 4 + payloadLength / 2);
+        assertThrows(IOException.class, () -> RegionBitmask.decode(truncated));
+
+        // Declared rawLength that disagrees with (understates) the true decompressed size.
+        // Naively truncating a legitimate encode() output doesn't reach this case: readEntries
+        // already rejects any packet whose declared count needs more bytes than remain, and a
+        // real batch has zero slack (rawLength == varintBytes + count * ENTRY_BYTES exactly),
+        // so any understatement always trips that check first. To isolate the inflate()-level
+        // defect, hand-build a stream whose declared count (1) is satisfied by a genuine prefix
+        // of the decompressed data, with extra genuine bytes beyond it that a real encode()
+        // would never produce. Before the fix this silently decoded to a plausible one-entry
+        // map with the trailing bytes dropped and no exception — the actual silent-corruption
+        // failure mode Important 1 described; readEntries has nothing to object to because the
+        // declared count IS satisfied by what made it into the undersized buffer.
+        ByteBuffer trueRaw = ByteBuffer.allocate(1 + 8 + RegionBitmask.MASK_BYTES + 500);
+        trueRaw.put((byte) 1); // varint count = 1
+        trueRaw.putLong(RegionBitmask.regionKey(0, 0));
+        trueRaw.put(new byte[RegionBitmask.MASK_BYTES]);
+        trueRaw.put(new byte[500]); // extra genuine bytes beyond the declared single entry
+        byte[] trueRawBytes = trueRaw.array();
+
+        Deflater deflater = new Deflater(Deflater.BEST_COMPRESSION);
+        deflater.setInput(trueRawBytes);
+        deflater.finish();
+        byte[] buf = new byte[trueRawBytes.length + 64];
+        int compressedLength = deflater.deflate(buf);
+        deflater.end();
+        byte[] compressed = java.util.Arrays.copyOf(buf, compressedLength);
+
+        int understatedRawLength = 1 + 8 + RegionBitmask.MASK_BYTES; // stops right at entry 1
+        ByteBuffer disagreeing = ByteBuffer.allocate(4 + compressed.length);
+        disagreeing.putInt(understatedRawLength);
+        disagreeing.put(compressed);
+        assertThrows(IOException.class, () -> RegionBitmask.decode(disagreeing.array()));
     }
 
     @Test
