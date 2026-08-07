@@ -89,6 +89,9 @@ public class PlayerTracker {
         return syncedChunks.get(uuid);
     }
 
+    /** Filled in by the join-gate work; a no-op until then. */
+    public void clearGate(java.util.UUID uuid, String dimensionId) {}
+
     public it.unimi.dsi.fastutil.longs.LongSet getSyncedChunks(
             java.util.UUID uuid, net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension) {
         SyncedChunkStore store = syncedChunks.get(uuid);

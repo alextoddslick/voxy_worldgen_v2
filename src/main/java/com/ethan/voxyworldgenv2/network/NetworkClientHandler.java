@@ -18,8 +18,10 @@ public class NetworkClientHandler {
     public static void init() {
         ClientPlayNetworking.registerGlobalReceiver(NetworkHandler.HandshakePayload.TYPE, (payload, context) -> {
             boolean serverHasMod = payload.serverHasMod();
+            int protocol = payload.protocolVersion();
             context.client().execute(() -> {
                 NetworkState.setServerConnected(serverHasMod);
+                NetworkState.setServerProtocol(protocol);
             });
         });
 
