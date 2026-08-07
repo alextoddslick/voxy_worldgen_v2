@@ -12,6 +12,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.storage.LevelResource;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -54,6 +55,8 @@ public final class LodMemory {
     private static boolean pendingUpload;
     private static long pendingSinceMs;
     private static int uploadAttempts;
+    /** So a connection with no stable world identity is reported once, not once per dimension. */
+    private static boolean unidentifiedWorldLogged;
     private static final long UPLOAD_INITIAL_WAIT_MS = 15_000L;
     private static final int MAX_UPLOAD_ATTEMPTS = 4;
 
@@ -70,7 +73,7 @@ public final class LodMemory {
      * (old) dimension's map and gets persisted there on the next flush.
      */
     public static synchronized void record(ResourceKey<Level> payloadDimension, int chunkX, int chunkZ) {
-        if (dimensionId == null || !payloadDimension.equals(dimension)) return;
+        if (worldKey == null || dimensionId == null || !payloadDimension.equals(dimension)) return;
         byte[] mask = regions.computeIfAbsent(
             RegionBitmask.regionKey(chunkX, chunkZ), k -> new byte[RegionBitmask.MASK_BYTES]);
         if (!RegionBitmask.get(mask, chunkX, chunkZ)) {
@@ -134,6 +137,7 @@ public final class LodMemory {
         dirty = false;
         pendingUpload = false;
         uploadAttempts = 0;
+        unidentifiedWorldLogged = false;
     }
 
     /** Flush the previous dimension, load the new one, upload it. */
@@ -146,6 +150,17 @@ public final class LodMemory {
         dimensionId = newDimension.location().toString();
         dirty = false;
         lastFlushMs = System.currentTimeMillis();
+
+        if (worldKey == null) {
+            // No stable identity for this world: remember nothing, persist nothing, upload nothing.
+            // The server then re-streams as it always did, which is the safe direction.
+            if (!unidentifiedWorldLogged) {
+                unidentifiedWorldLogged = true;
+                VoxyWorldGenV2.LOGGER.warn(
+                    "no stable world identity for this connection; LOD memory is disabled for this session");
+            }
+            return;
+        }
 
         Path file = fileFor(worldKey, dimensionId);
         try {
@@ -199,17 +214,51 @@ public final class LodMemory {
             .resolve(dimensionId.replace(':', '_').replace('/', '_') + ".bin");
     }
 
+    /**
+     * A key that identifies this world, or {@code null} when no stable identity is available.
+     *
+     * <p>Null is not a failure to be papered over with a shared fallback key: every unidentified
+     * connection would then share one memory file, and one world's known set would be uploaded for
+     * another — the same cross-world false positive as two saves sharing a key, with the same
+     * permanently blank result. The caller disables persistence and upload instead.
+     */
     private static String worldKeyFor(Minecraft client) {
-        String raw;
         var server = client.getCurrentServer();
         if (server != null) {
-            raw = "server:" + server.ip;
-        } else if (client.getSingleplayerServer() != null) {
-            raw = "single:" + client.getSingleplayerServer().getWorldData().getLevelName();
-        } else {
-            raw = "unknown";
+            return sha256Hex("server:" + server.ip).substring(0, 16);
         }
-        return sha256Hex(raw).substring(0, 16);
+        String levelId = singleplayerLevelId(client);
+        if (levelId != null && !levelId.isEmpty()) {
+            return sha256Hex("singleplayer:" + levelId).substring(0, 16);
+        }
+        return null;
+    }
+
+    /**
+     * The save's storage level id — the directory identifier, not the display name.
+     *
+     * <p>Minecraft uniquifies the save folder ("New World (1)") but not the display name, so two
+     * different saves can both be called "New World". Keying on the display name would give them
+     * one shared memory file and make world B upload world A's known set.
+     *
+     * <p>{@code MinecraftServer.storageSource} is protected, so the level id is read through the
+     * public {@code getWorldPath}. Verified against the Mojang-mapped 1.21.1 jar:
+     * {@code getWorldPath(r)} is {@code storageSource.getLevelPath(r)} =
+     * {@code levelDirectory.path().resolve(r.getId())}, and {@code LevelResource.ROOT}'s id is
+     * {@code "."} — hence the {@code normalize()}, without which the last path element is ".".
+     * {@code LevelStorageAccess.getLevelId()} is that same directory name.
+     */
+    private static String singleplayerLevelId(Minecraft client) {
+        var integrated = client.getSingleplayerServer();
+        if (integrated == null) return null;
+        try {
+            Path root = integrated.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
+            Path name = root.getFileName();
+            return name == null ? null : name.toString();
+        } catch (Exception e) {
+            VoxyWorldGenV2.LOGGER.warn("could not read the singleplayer level id: {}", e.toString());
+            return null;
+        }
     }
 
     private static String sha256Hex(String input) {
