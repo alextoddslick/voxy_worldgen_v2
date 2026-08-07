@@ -27,6 +27,9 @@ build/
 .gradle/
 run/
 
+# Server log output (untracked scratch, not part of the mod)
+logs/
+
 # IDE
 .idea/
 *.iml
