@@ -83,5 +83,11 @@ public final class Config {
         // upload what it already has. A vanilla or older client never uploads, so this timeout is
         // what makes it behave exactly as it did before the feature existed. 0 disables the gate.
         public int knownChunksTimeoutSeconds = 10;
+        // Permission level required for /voxygen refresh. 0 lets any player refresh themselves.
+        // Targeting another player always requires level 2 regardless of this value, so lowering
+        // it cannot let one player force egress onto another.
+        public int refreshPermissionLevel = 2;
+        // What "/voxygen refresh near" means, in chunks.
+        public int refreshDefaultRadius = 16;
     }
 }

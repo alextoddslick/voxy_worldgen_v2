@@ -28,6 +28,9 @@ public class PlayerTracker {
      */
     private final Map<UUID, Map<String, Long>> awaitingKnownSet = new ConcurrentHashMap<>();
 
+    /** Catch-up radius override while a /voxygen refresh drains. UUID -> dimension id -> chunks. */
+    private final Map<UUID, Map<String, Integer>> refreshRadius = new ConcurrentHashMap<>();
+
     private PlayerTracker() {
         this.players = new ConcurrentHashMap<>();
         this.syncedChunks = new ConcurrentHashMap<>();
@@ -48,12 +51,14 @@ public class PlayerTracker {
         players.remove(id);
         syncedChunks.remove(id);
         awaitingKnownSet.remove(id);
+        refreshRadius.remove(id);
     }
 
     public void clear() {
         players.clear();
         syncedChunks.clear();
         awaitingKnownSet.clear();
+        refreshRadius.clear();
     }
 
     /**
@@ -82,6 +87,7 @@ public class PlayerTracker {
                 it.remove();
                 syncedChunks.remove(entry.getKey());
                 awaitingKnownSet.remove(entry.getKey());
+                refreshRadius.remove(entry.getKey());
                 removed++;
             } else if (live != entry.getValue()) {
                 entry.setValue(live);
@@ -96,6 +102,22 @@ public class PlayerTracker {
 
     public SyncedChunkStore getStore(java.util.UUID uuid) {
         return syncedChunks.get(uuid);
+    }
+
+    public void setRefreshRadius(UUID uuid, String dimensionId, int radius) {
+        refreshRadius.computeIfAbsent(uuid, k -> new ConcurrentHashMap<>()).put(dimensionId, radius);
+    }
+
+    public int getRefreshRadius(UUID uuid, String dimensionId) {
+        Map<String, Integer> byDim = refreshRadius.get(uuid);
+        if (byDim == null) return 0;
+        Integer r = byDim.get(dimensionId);
+        return r == null ? 0 : r;
+    }
+
+    public void clearRefreshRadius(UUID uuid, String dimensionId) {
+        Map<String, Integer> byDim = refreshRadius.get(uuid);
+        if (byDim != null) byDim.remove(dimensionId);
     }
 
     public void armGate(UUID uuid, String dimensionId) {
