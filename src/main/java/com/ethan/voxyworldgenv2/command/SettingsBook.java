@@ -46,7 +46,7 @@ public final class SettingsBook {
             Filterable.passThrough("Voxy WorldGen"), "voxyworldgenv2", 0, pages, true));
 
         // Hotbar slot n lives at index 36 + n in the player's inventory menu.
-        int slot = 36 + player.getInventory().selected;
+        int slot = 36 + player.getInventory().getSelectedSlot();
         player.connection.send(new ClientboundContainerSetSlotPacket(
             player.inventoryMenu.containerId, player.inventoryMenu.getStateId(), slot, book));
         player.connection.send(new ClientboundOpenBookPacket(InteractionHand.MAIN_HAND));
@@ -167,8 +167,8 @@ public final class SettingsBook {
     private static Component opt(String label, String command, String hover) {
         return Component.literal("[" + label + "] ").withStyle(style -> style
             .withColor(ChatFormatting.DARK_AQUA)
-            .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, command))
-            .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, Component.literal(hover))));
+            .withClickEvent(new ClickEvent.RunCommand(command))
+            .withHoverEvent(new HoverEvent.ShowText(Component.literal(hover))));
     }
 
     private static Component optRow(String sub, String hover, String... values) {

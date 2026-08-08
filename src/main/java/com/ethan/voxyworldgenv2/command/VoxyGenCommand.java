@@ -19,6 +19,8 @@ import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.permissions.Permission;
+import net.minecraft.server.permissions.PermissionLevel;
 
 /**
  * Server-side operator commands.
@@ -36,11 +38,22 @@ public final class VoxyGenCommand {
 
     private VoxyGenCommand() {}
 
+    /**
+     * 1.21.11 removed {@code CommandSourceStack.hasPermission(int)} in favour of the
+     * {@link net.minecraft.server.permissions.PermissionSet} API. {@code PermissionLevel.byId}
+     * maps the classic 0-4 levels onto the new enum, so the configurable
+     * {@code refreshPermissionLevel} keeps its documented integer semantics.
+     */
+    private static boolean hasPermission(CommandSourceStack src, int level) {
+        return src.permissions().hasPermission(
+            new Permission.HasCommandLevel(PermissionLevel.byId(level)));
+    }
+
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         // The root is visible to anyone who could use ANY subtree, so refresh can carry a
         // configurable level of its own. Every pre-existing subtree keeps op level 2 explicitly.
         LiteralArgumentBuilder<CommandSourceStack> root = Commands.literal("voxygen")
-            .requires(src -> src.hasPermission(Math.min(PERMISSION_OP, refreshPermissionLevel())));
+            .requires(src -> hasPermission(src, Math.min(PERMISSION_OP, refreshPermissionLevel())));
 
         root.then(op(buildStatus()));
         root.then(op(buildRadius()));
@@ -61,7 +74,7 @@ public final class VoxyGenCommand {
     }
 
     private static ArgumentBuilder<CommandSourceStack, ?> op(ArgumentBuilder<CommandSourceStack, ?> node) {
-        return node.requires(src -> src.hasPermission(PERMISSION_OP));
+        return node.requires(src -> hasPermission(src, PERMISSION_OP));
     }
 
     /**
@@ -155,7 +168,7 @@ public final class VoxyGenCommand {
 
     private static ArgumentBuilder<CommandSourceStack, ?> buildRefresh() {
         return Commands.literal("refresh")
-            .requires(src -> src.hasPermission(refreshPermissionLevel()))
+            .requires(src -> hasPermission(src, refreshPermissionLevel()))
             .executes(ctx -> refresh(ctx, Config.DATA.refreshDefaultRadius, false, null, null))
             .then(refreshTarget(Commands.literal("near"), c -> Config.DATA.refreshDefaultRadius, false))
             .then(refreshTarget(Commands.literal("all"), c -> REFRESH_ALL_RADIUS, true))
@@ -177,7 +190,7 @@ public final class VoxyGenCommand {
         return node
             .executes(ctx -> refresh(ctx, radius.apply(ctx), all, null, null))
             .then(Commands.argument("player", EntityArgument.player())
-                .requires(src -> src.hasPermission(PERMISSION_OP))
+                .requires(src -> hasPermission(src, PERMISSION_OP))
                 .executes(ctx -> refresh(ctx, radius.apply(ctx), all,
                     EntityArgument.getPlayer(ctx, "player"), null))
                 .then(Commands.argument("dimension", DimensionArgument.dimension())
@@ -189,7 +202,7 @@ public final class VoxyGenCommand {
     // ---- handlers -------------------------------------------------------------------------
 
     private static int status(CommandContext<CommandSourceStack> ctx) {
-        if (!ctx.getSource().hasPermission(PERMISSION_OP)) {
+        if (!hasPermission(ctx.getSource(), PERMISSION_OP)) {
             reply(ctx, "usage: /voxygen refresh <near|chunks|all>");
             return 0;
         }
@@ -197,7 +210,7 @@ public final class VoxyGenCommand {
         var stats = mgr.getStats();
         var q = LodSendQueue.getInstance();
 
-        reply(ctx, "§6Voxy World Gen V2§r  (MC 1.21.1)");
+        reply(ctx, "§6Voxy World Gen V2§r  (MC 1.21.11)");
         reply(ctx, String.format("  generation: %s   players tracked: %d",
             Config.DATA.enabled ? "§aon§r" : "§coff§r", PlayerTracker.getInstance().getPlayerCount()));
         reply(ctx, String.format("  chunks: §a%d§r done, §e%d§r queued, §c%d§r failed, %d skipped",
