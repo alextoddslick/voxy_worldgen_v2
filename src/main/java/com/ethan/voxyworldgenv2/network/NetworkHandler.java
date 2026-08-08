@@ -200,14 +200,14 @@ public class NetworkHandler {
 
         public KnownChunksPayload(FriendlyByteBuf buf) {
             this(
-                ResourceKey.create(Registries.DIMENSION, ResourceLocation.parse(buf.readUtf())),
+                ResourceKey.create(Registries.DIMENSION, Identifier.parse(buf.readUtf())),
                 buf.readBoolean(),
                 buf.readByteArray(MAX_PACKET_BYTES)
             );
         }
 
         public void write(FriendlyByteBuf buf) {
-            buf.writeUtf(dimension.location().toString());
+            buf.writeUtf(dimension.identifier().toString());
             buf.writeBoolean(last);
             buf.writeByteArray(body);
         }
@@ -265,8 +265,8 @@ public class NetworkHandler {
         // point the server has already moved it. Rejecting costs at most one re-send.
         if (!player.level().dimension().equals(payload.dimension())) {
             VoxyWorldGenV2.LOGGER.warn("ignoring known-chunks batch from {} for {} while they are in {}",
-                player.getName().getString(), payload.dimension().location(),
-                player.level().dimension().location());
+                player.getName().getString(), payload.dimension().identifier(),
+                player.level().dimension().identifier());
             return;
         }
 
