@@ -492,7 +492,7 @@ public final class ChunkGenerationManager {
                 : String.format(" (~%ds)", secs);
         }
 
-        String dim = currentDimensionKey != null ? currentDimensionKey.location().toString() : "?";
+        String dim = currentDimensionKey != null ? currentDimensionKey.identifier().toString() : "?";
         VoxyWorldGenV2.LOGGER.info(
             "generating [{}]: {} done @ {}/s, {} remaining in radius{}, {} active, {} skipped, {} failed{}",
             dim, completed, String.format("%.1f", cps), remaining, eta,
@@ -572,7 +572,7 @@ public final class ChunkGenerationManager {
         if (seconds <= 0) return;
         generationPausedUntilMs = System.currentTimeMillis() + seconds * 1000L;
         VoxyWorldGenV2.LOGGER.info("pausing generation {}s while {} loads into {} ({})",
-            seconds, playerName, dim.location(), isJoin ? "join" : "dimension change");
+            seconds, playerName, dim.identifier(), isJoin ? "join" : "dimension change");
     }
 
     public boolean isTransitionPaused() {
@@ -740,7 +740,7 @@ public final class ChunkGenerationManager {
             if (stuck.isEmpty()) continue;
             VoxyWorldGenV2.LOGGER.warn(
                 "abandoning {} generation task(s) in {} ({}) - releasing permits, chunks will retry",
-                stuck.size(), entry.getKey().location(),
+                stuck.size(), entry.getKey().identifier(),
                 hasPlayers ? "stuck >" + timeout + "s" : "dimension has no players");
             for (long posKey : stuck) {
                 ChunkPos pos = new ChunkPos(ChunkPos.getX(posKey), ChunkPos.getZ(posKey));

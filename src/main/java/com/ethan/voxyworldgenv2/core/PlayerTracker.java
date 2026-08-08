@@ -238,7 +238,7 @@ public class PlayerTracker {
 
     /** Stable string key for a dimension, e.g. "minecraft:overworld". */
     public static String dimensionId(net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension) {
-        return dimension.location().toString();
+        return dimension.identifier().toString();
     }
 
     public int getPlayerCount() {

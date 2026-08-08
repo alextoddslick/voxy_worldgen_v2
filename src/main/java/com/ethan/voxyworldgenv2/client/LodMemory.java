@@ -147,7 +147,7 @@ public final class LodMemory {
 
         worldKey = worldKeyFor(client);
         dimension = newDimension;
-        dimensionId = newDimension.location().toString();
+        dimensionId = newDimension.identifier().toString();
         dirty = false;
         lastFlushMs = System.currentTimeMillis();
 
