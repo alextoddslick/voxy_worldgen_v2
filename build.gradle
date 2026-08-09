@@ -74,3 +74,43 @@ jar {
         rename { "${it}_${mod_name}" }
     }
 }
+
+// dev: property-guarded client run configs for macOS Zink smoke testing.
+// -PzinkRun replicates the env the voxy repo's build.fabric.gradle.kts injects for
+// scripts/macos/run-zink-client.sh (Mesa/Zink + KosmicKrisp + patched GLFW); Loom does
+// not forward -D args or DYLD_* env from the invoking shell, so they must go through
+// the Loom run-config DSL. -PautoJoin adds a fixed offline username and auto-joins the
+// local test server. -PgeomBufMB=<n> caps Voxy's geometry buffer (Zink cannot service
+// the ~4GB default allocation).
+if (project.hasProperty("zinkRun")) {
+    def home = System.getProperty("user.home")
+    def mesaDirProp = (project.findProperty("mesaDir") ?: "mesa-native").toString()
+    def mesa = mesaDirProp.startsWith("/") ? mesaDirProp : "$home/$mesaDirProp"
+    def glfwLib = "$home/src/glfw/build/src/libglfw.3.dylib"
+    def interposeLib = file("$mesa/lib/libgl_interpose.dylib")
+    loom.runs.named("client") {
+        environmentVariable("DYLD_LIBRARY_PATH", "$mesa/lib")
+        environmentVariable("LIBGL_DRIVERS_PATH", "$mesa/lib/dri")
+        environmentVariable("VK_DRIVER_FILES", "$mesa/share/vulkan/icd.d/kosmickrisp_mesa_icd.aarch64.json")
+        environmentVariable("EGL_PLATFORM", "surfaceless")
+        environmentVariable("MESA_LOADER_DRIVER_OVERRIDE", "zink")
+        environmentVariable("MESA_GL_VERSION_OVERRIDE", "4.6")
+        environmentVariable("MESA_GLSL_VERSION_OVERRIDE", "460")
+        if (interposeLib.exists()) {
+            environmentVariable("DYLD_INSERT_LIBRARIES", interposeLib.absolutePath)
+        }
+        vmArg("-Dorg.lwjgl.egl.libname=$mesa/lib/libEGL.dylib")
+        vmArg("-Dorg.lwjgl.opengl.libname=$mesa/lib/libGL.dylib")
+        vmArg("-Dorg.lwjgl.glfw.libname=$glfwLib")
+        vmArg("-Djoml.nounsafe=true")
+        if (project.hasProperty("geomBufMB")) {
+            vmArg("-Dvoxy.geometryBufferSizeOverrideMB=" + project.property("geomBufMB"))
+        }
+        programArgs("--width", "854", "--height", "480")
+    }
+}
+if (project.hasProperty("autoJoin")) {
+    loom.runs.named("client") {
+        programArgs("--username", "VoxyTester", "--quickPlayMultiplayer", "localhost:25565")
+    }
+}
