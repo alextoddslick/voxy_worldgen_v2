@@ -283,7 +283,7 @@ public final class ChunkGenerationManager {
                                             // radius is claimed on join and never actually arrives.
                                             // (Only tracked when the feature is on: with rememberSentChunks
                                             // off, onChunkLoad already sends unconditionally.)
-                                            store.markDeferred(dimId, syncPos.toLong());
+                                            store.markDeferred(dimId, syncPos.pack());
                                         }
                                     }
                                 }

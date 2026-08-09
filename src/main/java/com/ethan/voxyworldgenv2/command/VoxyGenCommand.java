@@ -210,7 +210,7 @@ public final class VoxyGenCommand {
         var stats = mgr.getStats();
         var q = LodSendQueue.getInstance();
 
-        reply(ctx, "§6Voxy World Gen V2§r  (MC 1.21.11)");
+        reply(ctx, "§6Voxy World Gen V2§r  (MC 26.1.2)");
         reply(ctx, String.format("  generation: %s   players tracked: %d",
             Config.DATA.enabled ? "§aon§r" : "§coff§r", PlayerTracker.getInstance().getPlayerCount()));
         reply(ctx, String.format("  chunks: §a%d§r done, §e%d§r queued, §c%d§r failed, %d skipped",
@@ -388,7 +388,7 @@ public final class VoxyGenCommand {
 
         int forgotten = all
             ? store.forgetAll(dim)
-            : store.forgetWithin(dim, target.chunkPosition().x, target.chunkPosition().z, radius);
+            : store.forgetWithin(dim, target.chunkPosition().x(), target.chunkPosition().z(), radius);
 
         PlayerTracker.getInstance().setRefreshRadius(target.getUUID(), dim, radius);
 

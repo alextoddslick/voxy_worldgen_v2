@@ -65,7 +65,7 @@ public final class ServerEventHandler {
         // issue-#40 re-send even with the feature supposedly disabled.
         boolean skipKnown = Config.DATA.rememberSentChunks;
         String dim = skipKnown ? PlayerTracker.dimensionId(level.dimension()) : null;
-        long key = chunk.getPos().toLong();
+        long key = chunk.getPos().pack();
         for (ServerPlayer player : PlayerTracker.getInstance().getPlayers()) {
             if (player.level() != level) continue;
             if (skipKnown) {

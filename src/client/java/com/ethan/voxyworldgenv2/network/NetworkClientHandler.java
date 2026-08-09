@@ -99,7 +99,7 @@ public class NetworkClientHandler {
         // not "a packet arrived", or the server will skip chunks that never made it in. A chunk
         // with even one failed section is not recorded, since LodMemory tracks whole columns.
         if (allIngested) {
-            com.ethan.voxyworldgenv2.client.LodMemory.record(payload.dimension(), payload.pos().x, payload.pos().z);
+            com.ethan.voxyworldgenv2.client.LodMemory.record(payload.dimension(), payload.pos().x(), payload.pos().z());
         }
     }
 }
