@@ -20,8 +20,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * Carpet-style live HUD in the tab list (hold Tab), toggled per player with {@code /voxygen log}.
  *
  * <p>Same mechanism as carpet's {@code /log tps}: the server rewrites the tab-list header/footer
- * once a second for subscribed players. Session-scoped on purpose — like carpet, a relog clears
- * the subscription. Note this owns the tab header/footer while enabled; a pack that also sets a
+ * once a second for subscribed players. The toggle survives a relog: a subscribed player who
+ * disconnects stays subscribed and the HUD resumes when they rejoin; only a server restart (or
+ * toggling again) turns it off. Note this owns the tab header/footer while enabled; a pack that also sets a
  * fancy tab header will be overridden until the player toggles off (an empty header/footer is
  * sent on unsubscribe to hand it back).
  */
@@ -50,12 +51,12 @@ public final class TabHud {
     /** Called once a second from the manager's tick. */
     public static void tick(MinecraftServer server) {
         if (SUBSCRIBED.isEmpty()) return;
-        SUBSCRIBED.removeIf(id -> {
+        for (UUID id : SUBSCRIBED) {
             ServerPlayer p = server.getPlayerList().getPlayer(id);
-            if (p == null) return true; // disconnected; subscription is session-scoped
-            send(p);
-            return false;
-        });
+            // offline players stay subscribed so the HUD resumes when they rejoin;
+            // the set only resets on server restart or an explicit toggle-off
+            if (p != null) send(p);
+        }
     }
 
     private static void send(ServerPlayer viewer) {

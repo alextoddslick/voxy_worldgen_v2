@@ -445,7 +445,7 @@ public final class VoxyGenCommand {
         }
         boolean on = TabHud.toggle(player);
         reply(ctx, on
-            ? "tab HUD \u00a7aon\u00a7r - hold Tab to see live worldgen info (/voxygen log to hide)"
+            ? "tab HUD \u00a7aon\u00a7r - hold Tab to see live worldgen info; stays on across relogs (/voxygen log to hide)"
             : "tab HUD \u00a7coff\u00a7r");
         return 1;
     }
