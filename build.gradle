@@ -83,6 +83,17 @@ jar {
 // local test server. -PgeomBufMB=<n> caps Voxy's geometry buffer (Zink cannot service
 // the ~4GB default allocation).
 if (project.hasProperty("zinkRun")) {
+    // Voxy's release jar nests rocksdbjni / lwjgl-lmdb / lwjgl-zstd with ONLY
+    // linux64+win64 natives; on macOS its RocksDB storage backend hard-crashes at
+    // world join ("librocksdbjni-osx-arm64.jnilib was not found inside JAR").
+    // Supplying the full artifacts on the dev runtime classpath lets the JNI
+    // loaders find the mac natives via parent-classloader resource lookup —
+    // same approach the voxy repo's own dev env uses.
+    dependencies {
+        localRuntime "org.rocksdb:rocksdbjni:10.2.1"
+        localRuntime "org.lwjgl:lwjgl-zstd:3.3.3:natives-macos-arm64"
+        localRuntime "org.lwjgl:lwjgl-lmdb:3.3.3:natives-macos-arm64"
+    }
     def home = System.getProperty("user.home")
     def mesaDirProp = (project.findProperty("mesaDir") ?: "mesa-native").toString()
     def mesa = mesaDirProp.startsWith("/") ? mesaDirProp : "$home/$mesaDirProp"
