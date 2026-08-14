@@ -61,6 +61,8 @@ public final class VoxyGenCommand {
         root.then(op(buildQueue()));
         root.then(op(buildEnabled()));
         root.then(op(buildRateLimit()));
+        root.then(op(buildGenRate()));
+        root.then(op(buildSingleplayer()));
         root.then(op(buildLogInterval()));
         root.then(op(buildSettings()));
         root.then(op(buildHeadless()));
@@ -97,16 +99,31 @@ public final class VoxyGenCommand {
 
     private static ArgumentBuilder<CommandSourceStack, ?> buildRadius() {
         return Commands.literal("radius")
-            .executes(ctx -> report(ctx, "generationRadius", Config.DATA.generationRadius))
+            .executes(ctx -> report(ctx, "generationRadius", Config.getGenerationRadius(spActive())))
             .then(Commands.argument("chunks", IntegerArgumentType.integer(1, 512))
                 .executes(VoxyGenCommand::setRadius));
     }
 
     private static ArgumentBuilder<CommandSourceStack, ?> buildTasks() {
         return Commands.literal("tasks")
-            .executes(ctx -> report(ctx, "maxActiveTasks", Config.DATA.maxActiveTasks))
+            .executes(ctx -> report(ctx, "maxActiveTasks", Config.getMaxActiveTasks(spActive())))
             .then(Commands.argument("count", IntegerArgumentType.integer(1, 128))
                 .executes(VoxyGenCommand::setTasks));
+    }
+
+    private static ArgumentBuilder<CommandSourceStack, ?> buildGenRate() {
+        return Commands.literal("genrate")
+            .executes(VoxyGenCommand::showGenRate)
+            .then(Commands.literal("off").executes(ctx -> applyGenRate(ctx, 0)))
+            .then(Commands.argument("cps", IntegerArgumentType.integer(1, 100_000))
+                .executes(ctx -> applyGenRate(ctx, IntegerArgumentType.getInteger(ctx, "cps"))));
+    }
+
+    private static ArgumentBuilder<CommandSourceStack, ?> buildSingleplayer() {
+        return Commands.literal("singleplayer")
+            .executes(VoxyGenCommand::showSingleplayer)
+            .then(Commands.argument("value", BoolArgumentType.bool())
+                .executes(VoxyGenCommand::setSingleplayer));
     }
 
     private static ArgumentBuilder<CommandSourceStack, ?> buildQueue() {
@@ -215,8 +232,10 @@ public final class VoxyGenCommand {
             Config.DATA.enabled ? "§aon§r" : "§coff§r", PlayerTracker.getInstance().getPlayerCount()));
         reply(ctx, String.format("  chunks: §a%d§r done, §e%d§r queued, §c%d§r failed, %d skipped",
             stats.getCompleted(), stats.getQueued(), stats.getFailed(), stats.getSkipped()));
-        reply(ctx, String.format("  active tasks: %d / %d   radius: %d chunks",
-            mgr.getActiveTaskCount(), Config.DATA.maxActiveTasks, Config.DATA.generationRadius));
+        boolean sp = mgr.isSingleplayer();
+        reply(ctx, String.format("  active tasks: %d / %d   radius: %d chunks%s",
+            mgr.getActiveTaskCount(), Config.getMaxActiveTasks(sp), Config.getGenerationRadius(sp),
+            sp ? " §b[Singleplayer]§r" : ""));
         reply(ctx, String.format("  LOD sender: %s   queued %d/%d   sent %d pkt / %s",
             q.isRunning() ? "§aalive§r" : "§cstopped§r",
             q.getQueuedJobs(), q.getMaxQueuedJobs(), q.getPacketsSent(), humanBytes(q.getBytesSent())));
@@ -231,11 +250,17 @@ public final class VoxyGenCommand {
 
     private static int setRadius(CommandContext<CommandSourceStack> ctx) {
         int v = IntegerArgumentType.getInteger(ctx, "chunks");
-        int old = Config.DATA.generationRadius;
-        Config.DATA.generationRadius = v;
+        boolean sp = spActive();
+        int old = Config.getGenerationRadius(sp);
+        if (sp) {
+            Config.DATA.singleplayer.generationRadius = v;
+        } else {
+            Config.DATA.generationRadius = v;
+        }
         persist();
-        reply(ctx, String.format("generationRadius %d -> §a%d§r chunks", old, v));
-        if (v > 128) {
+        reply(ctx, String.format("generationRadius %d -> §a%d§r chunks%s", old, v,
+            sp ? " §b(singleplayer profile)§r" : ""));
+        if (v > 128 && !sp) {
             reply(ctx, "§e warning:§r a large radius streams a lot of data; watch egress on hosted servers");
         }
         maybeShowBook(ctx);
@@ -244,10 +269,16 @@ public final class VoxyGenCommand {
 
     private static int setTasks(CommandContext<CommandSourceStack> ctx) {
         int v = IntegerArgumentType.getInteger(ctx, "count");
-        int old = Config.DATA.maxActiveTasks;
-        Config.DATA.maxActiveTasks = v;
+        boolean sp = spActive();
+        int old = Config.getMaxActiveTasks(sp);
+        if (sp) {
+            Config.DATA.singleplayer.maxActiveTasks = v;
+        } else {
+            Config.DATA.maxActiveTasks = v;
+        }
         persist();
-        reply(ctx, String.format("maxActiveTasks %d -> §a%d§r", old, v));
+        reply(ctx, String.format("maxActiveTasks %d -> §a%d§r%s", old, v,
+            sp ? " §b(singleplayer profile)§r" : ""));
         maybeShowBook(ctx);
         return 1;
     }
@@ -272,7 +303,7 @@ public final class VoxyGenCommand {
     }
 
     private static int showRateLimit(CommandContext<CommandSourceStack> ctx) {
-        double v = Config.DATA.maxMbpsPerPlayer;
+        double v = Config.getMaxMbpsPerPlayer(spActive());
         reply(ctx, v <= 0
             ? "per-player LOD limit: §eunlimited§r  (set with /voxygen ratelimit <mbps>)"
             : String.format("per-player LOD limit: §b%.2f Mbps§r (%s/s)", v, humanBytes((long) (v * 125_000))));
@@ -280,8 +311,13 @@ public final class VoxyGenCommand {
     }
 
     private static int applyRateLimit(CommandContext<CommandSourceStack> ctx, double mbps) {
-        double old = Config.DATA.maxMbpsPerPlayer;
-        Config.DATA.maxMbpsPerPlayer = mbps;
+        boolean sp = spActive();
+        double old = Config.getMaxMbpsPerPlayer(sp);
+        if (sp) {
+            Config.DATA.singleplayer.maxMbpsPerPlayer = mbps;
+        } else {
+            Config.DATA.maxMbpsPerPlayer = mbps;
+        }
         persist();
         if (mbps <= 0) {
             reply(ctx, String.format("per-player LOD limit %s -> §eunlimited§r",
@@ -311,9 +347,11 @@ public final class VoxyGenCommand {
         }
         reply(ctx, String.format("  now        : §b%.2f MB/s§r raw before compression  (%.2f Mbps)",
             bps / 1_000_000.0, (bps * 8.0) / 1_000_000.0));
+        boolean sp = ChunkGenerationManager.getInstance().isSingleplayer();
+        double limit = Config.getMaxMbpsPerPlayer(sp);
         reply(ctx, String.format("  limit      : %s",
-            Config.DATA.maxMbpsPerPlayer <= 0 ? "§eunlimited§r"
-                : String.format("§b%.2f Mbps§r per player", Config.DATA.maxMbpsPerPlayer)));
+            limit <= 0 ? (sp ? "§eunlimited§r §b[Singleplayer]§r" : "§eunlimited§r")
+                : String.format("§b%.2f Mbps§r per player%s", limit, sp ? " §b[Singleplayer]§r" : "")));
         reply(ctx, String.format("  queue      : %d/%d   dropped: %d   throttled: %.1fs",
             q.getQueuedJobs(), q.getMaxQueuedJobs(), q.getJobsDropped(),
             q.getThrottleWaitMillis() / 1000.0));
@@ -485,12 +523,78 @@ public final class VoxyGenCommand {
         return 1;
     }
 
+    private static int showGenRate(CommandContext<CommandSourceStack> ctx) {
+        int v = Config.getMaxChunksPerSecond(spActive());
+        reply(ctx, v <= 0
+            ? "generation rate: §eunlimited§r  (cap with /voxygen genrate <chunks per second>)"
+            : String.format("generation rate: §b%d§r chunks/s", v));
+        return 1;
+    }
+
+    private static int applyGenRate(CommandContext<CommandSourceStack> ctx, int cps) {
+        boolean sp = spActive();
+        int old = Config.getMaxChunksPerSecond(sp);
+        if (sp) {
+            Config.DATA.singleplayer.maxChunksPerSecond = cps;
+        } else {
+            Config.DATA.maxChunksPerSecond = cps;
+        }
+        persist();
+        reply(ctx, String.format("generation rate %s -> %s%s",
+            old <= 0 ? "unlimited" : old + " chunks/s",
+            cps <= 0 ? "§eunlimited§r" : String.format("§a%d§r chunks/s", cps),
+            sp ? " §b(singleplayer profile)§r" : ""));
+        maybeShowBook(ctx);
+        return 1;
+    }
+
+    private static int showSingleplayer(CommandContext<CommandSourceStack> ctx) {
+        var s = Config.DATA.singleplayer;
+        if (s == null || !s.enableSingleplayerDefaults) {
+            reply(ctx, "singleplayer profile: §coff§r - base settings and limits apply in singleplayer too");
+            return 1;
+        }
+        reply(ctx, String.format("singleplayer profile: §aon§r - radius §b%d§r, tasks §b%d§r, rate %s, gen %s, dim pause %s",
+            Config.getGenerationRadius(true), Config.getMaxActiveTasks(true),
+            s.maxMbpsPerPlayer <= 0 ? "§eunlimited§r" : String.format("§b%.1f Mbps§r", s.maxMbpsPerPlayer),
+            s.maxChunksPerSecond <= 0 ? "§eunlimited§r" : String.format("§b%d c/s§r", s.maxChunksPerSecond),
+            s.dimensionChangePauseSeconds <= 0 ? "§eoff§r" : s.dimensionChangePauseSeconds + "s"));
+        if (!ChunkGenerationManager.getInstance().isSingleplayer()) {
+            reply(ctx, "  (this is a dedicated server, so the profile is dormant here)");
+        }
+        return 1;
+    }
+
+    private static int setSingleplayer(CommandContext<CommandSourceStack> ctx) {
+        boolean v = BoolArgumentType.getBool(ctx, "value");
+        if (Config.DATA.singleplayer == null) Config.DATA.singleplayer = new Config.SingleplayerConfig();
+        Config.DATA.singleplayer.enableSingleplayerDefaults = v;
+        persist();
+        reply(ctx, v
+            ? "singleplayer profile §aon§r - this world uses the unthrottled singleplayer settings"
+            : "singleplayer profile §coff§r - this world uses the base settings and limits");
+        maybeShowBook(ctx);
+        return 1;
+    }
+
     private static int report(CommandContext<CommandSourceStack> ctx, String name, int value) {
         reply(ctx, String.format("%s = §b%d§r", name, value));
         return 1;
     }
 
     // ---- helpers --------------------------------------------------------------------------
+
+    /**
+     * True when a settings change should land in the singleplayer profile rather than the base
+     * config: the running server is integrated AND the profile is enabled — i.e. the profile
+     * holds the values the player is actually experiencing. Without this, the book's buttons
+     * would keep writing base values that an active profile then ignores.
+     */
+    private static boolean spActive() {
+        return ChunkGenerationManager.getInstance().isSingleplayer()
+            && Config.DATA.singleplayer != null
+            && Config.DATA.singleplayer.enableSingleplayerDefaults;
+    }
 
     /**
      * Writes the change to disk. The running worker reads {@code Config.DATA} directly, so the new

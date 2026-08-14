@@ -110,6 +110,10 @@ public final class ChunkGenerationManager {
     public ServerLevel getCurrentLevel() {
         return currentLevel;
     }
+
+    public boolean isSingleplayer() {
+        return server != null && server.isSingleplayer();
+    }
     
     public void initialize(MinecraftServer server) {
         this.server = server;
@@ -117,7 +121,7 @@ public final class ChunkGenerationManager {
         // unpaused by default
         this.pauseCheck = () -> false; 
         Config.load();
-        this.throttle = new Semaphore(Config.DATA.maxActiveTasks);
+        this.throttle = new Semaphore(Config.getMaxActiveTasks(isSingleplayer()));
         com.ethan.voxyworldgenv2.network.LodSendQueue.getInstance().start();
         startWorker();
         VoxyWorldGenV2.LOGGER.info("voxy world gen initialized");
@@ -219,7 +223,8 @@ public final class ChunkGenerationManager {
                 // try to find work around any player in their respective dimension
                 for (ServerPlayer player : players) {
                     DimensionState ds = getOrSetupState((ServerLevel) player.level());
-                    int radius = ds.tellusActive ? Math.max(Config.DATA.generationRadius, 128) : Config.DATA.generationRadius;
+                    int genRadius = Config.getGenerationRadius(isSingleplayer());
+                    int radius = ds.tellusActive ? Math.max(genRadius, 128) : genRadius;
                     batch = ds.distanceGraph.findWork(player.chunkPosition(), radius, ds.trackedBatches);
                     if (batch != null) {
                         activeState = ds;
@@ -237,8 +242,9 @@ public final class ChunkGenerationManager {
                         
                         DimensionState ds = getOrSetupState((ServerLevel) player.level());
                         String dimId = PlayerTracker.dimensionId(player.level().dimension());
+                        int genRadius = Config.getGenerationRadius(isSingleplayer());
                         int baseRadius = ds.tellusActive
-                            ? Math.max(Config.DATA.generationRadius, 128) : Config.DATA.generationRadius;
+                            ? Math.max(genRadius, 128) : genRadius;
                         // A /voxygen refresh can ask for a wider sweep than generationRadius. Widening
                         // the catch-up radius is what re-sends those chunks without a second send path.
                         int refreshOverride = PlayerTracker.getInstance()
@@ -327,9 +333,13 @@ public final class ChunkGenerationManager {
                 int processedCount = 0;
                 for (ChunkPos pos : preFiltered) {
                     if (!workerRunning.get()) break;
-                    
+
                     boolean acquired = false;
                     try {
+                        // Rate cap first, semaphore second: a permit held while sleeping off the
+                        // rate budget would starve in-flight tasks of nothing, but it would make
+                        // getActiveTaskCount lie about how much work is actually running.
+                        awaitGenerationRate();
                         acquired = throttle.tryAcquire(50, java.util.concurrent.TimeUnit.MILLISECONDS);
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
@@ -568,7 +578,7 @@ public final class ChunkGenerationManager {
     }
 
     private void pauseForTransition(String playerName, ResourceKey<Level> dim, boolean isJoin) {
-        int seconds = Config.DATA.dimensionChangePauseSeconds;
+        int seconds = Config.getDimensionChangePauseSeconds(isSingleplayer());
         if (seconds <= 0) return;
         generationPausedUntilMs = System.currentTimeMillis() + seconds * 1000L;
         VoxyWorldGenV2.LOGGER.info("pausing generation {}s while {} loads into {} ({})",
@@ -620,7 +630,8 @@ public final class ChunkGenerationManager {
         java.util.Map<DimensionState, Integer> maxCounts = new java.util.HashMap<>();
         for (ServerPlayer player : players) {
             DimensionState state = getOrSetupState((ServerLevel) player.level());
-            int radius = state.tellusActive ? Math.max(Config.DATA.generationRadius, 128) : Config.DATA.generationRadius;
+            int genRadius = Config.getGenerationRadius(isSingleplayer());
+            int radius = state.tellusActive ? Math.max(genRadius, 128) : genRadius;
             int missing = state.distanceGraph.countMissingInRange(player.chunkPosition(), radius);
             maxCounts.merge(state, missing, Math::max);
         }
@@ -628,8 +639,36 @@ public final class ChunkGenerationManager {
         maxCounts.forEach((state, count) -> state.remainingInRadius.set(count));
     }
 
+    // Token bucket for maxChunksPerSecond. Only the worker thread touches these, so no
+    // synchronization; the config value is re-read every iteration so /voxygen genrate and
+    // config reloads take effect mid-wait.
+    private double rateTokens;
+    private long rateLastRefillNanos;
+
+    /** Paces chunk dispatch to the configured chunks/second by sleeping on the worker thread. */
+    private void awaitGenerationRate() throws InterruptedException {
+        while (workerRunning.get()) {
+            int cps = Config.getMaxChunksPerSecond(isSingleplayer());
+            if (cps <= 0) return; // unlimited
+            long now = System.nanoTime();
+            if (rateLastRefillNanos != 0) {
+                double refill = (now - rateLastRefillNanos) / 1_000_000_000.0 * cps;
+                // Burst budget of one second's worth: enough to smooth scheduling jitter,
+                // small enough that an idle period cannot bank a frame-killing spike.
+                rateTokens = Math.min(cps, rateTokens + refill);
+            }
+            rateLastRefillNanos = now;
+            if (rateTokens >= 1.0) {
+                rateTokens -= 1.0;
+                return;
+            }
+            long sleepMs = (long) Math.ceil((1.0 - rateTokens) * 1000.0 / cps);
+            Thread.sleep(Math.max(1, Math.min(sleepMs, 250)));
+        }
+    }
+
     private void updateThrottleCapacity() {
-        int target = Config.DATA.maxActiveTasks;
+        int target = Config.getMaxActiveTasks(isSingleplayer());
         int available = throttle.availablePermits();
         int maxPossible = available + activeTaskCount.get();
         if (target > maxPossible) {
