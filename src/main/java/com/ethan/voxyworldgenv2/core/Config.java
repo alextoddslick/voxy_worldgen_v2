@@ -11,13 +11,23 @@ import java.nio.file.Path;
 
 public final class Config {
     
-    private static final Path CONFIG_PATH = FabricLoader.getInstance().getConfigDir().resolve("voxyworldgenv2.json");
+    private static Path getConfigPath() {
+        try {
+            var loader = FabricLoader.getInstance();
+            if (loader != null && loader.getConfigDir() != null) {
+                return loader.getConfigDir().resolve("voxyworldgenv2.json");
+            }
+        } catch (Throwable ignored) {}
+        return Path.of("config", "voxyworldgenv2.json");
+    }
+
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     
     public static ConfigData DATA = new ConfigData();
     
     public static void load() {
-        if (!Files.exists(CONFIG_PATH)) {
+        Path configPath = getConfigPath();
+        if (!Files.exists(configPath)) {
             // auto-configure for first run
             int cores = Runtime.getRuntime().availableProcessors();
             long maxMemory = Runtime.getRuntime().maxMemory() / (1024 * 1024); // mb
@@ -30,17 +40,21 @@ public final class Config {
             return;
         }
         
-        try (var reader = Files.newBufferedReader(CONFIG_PATH)) {
+        try (var reader = Files.newBufferedReader(configPath)) {
             DATA = GSON.fromJson(reader, ConfigData.class);
         } catch (IOException e) {
             VoxyWorldGenV2.LOGGER.error("failed to load config", e);
         }
+        if (DATA == null) DATA = new ConfigData(); // empty file parses to null
+        // A hand-edited "singleplayer": null must not NPE the toggles in the book/commands.
+        if (DATA.singleplayer == null) DATA.singleplayer = new SingleplayerConfig();
     }
     
     public static void save() {
+        Path configPath = getConfigPath();
         try {
-            Files.createDirectories(CONFIG_PATH.getParent());
-            try (var writer = Files.newBufferedWriter(CONFIG_PATH)) {
+            Files.createDirectories(configPath.getParent());
+            try (var writer = Files.newBufferedWriter(configPath)) {
                 GSON.toJson(DATA, writer);
             }
         } catch (IOException e) {
@@ -48,6 +62,73 @@ public final class Config {
         }
     }
     
+    /** Floor the auto values use: generous enough to feel unthrottled, still bounded. */
+    private static final int SINGLEPLAYER_AUTO_FLOOR = 128;
+
+    private static boolean singleplayerActive(boolean isSingleplayer) {
+        return isSingleplayer && DATA.singleplayer != null && DATA.singleplayer.enableSingleplayerDefaults;
+    }
+
+    public static int getGenerationRadius(boolean isSingleplayer) {
+        if (singleplayerActive(isSingleplayer)) {
+            int v = DATA.singleplayer.generationRadius;
+            return v > 0 ? v : Math.max(SINGLEPLAYER_AUTO_FLOOR, DATA.generationRadius);
+        }
+        return DATA.generationRadius;
+    }
+
+    public static int getMaxActiveTasks(boolean isSingleplayer) {
+        if (singleplayerActive(isSingleplayer)) {
+            int v = DATA.singleplayer.maxActiveTasks;
+            return v > 0 ? v : Math.max(SINGLEPLAYER_AUTO_FLOOR, DATA.maxActiveTasks);
+        }
+        return DATA.maxActiveTasks;
+    }
+
+    public static double getMaxMbpsPerPlayer(boolean isSingleplayer) {
+        if (singleplayerActive(isSingleplayer)) {
+            return DATA.singleplayer.maxMbpsPerPlayer;
+        }
+        return DATA.maxMbpsPerPlayer;
+    }
+
+    public static int getMaxChunksPerSecond(boolean isSingleplayer) {
+        if (singleplayerActive(isSingleplayer)) {
+            return DATA.singleplayer.maxChunksPerSecond;
+        }
+        return DATA.maxChunksPerSecond;
+    }
+
+    public static int getDimensionChangePauseSeconds(boolean isSingleplayer) {
+        if (singleplayerActive(isSingleplayer)) {
+            return DATA.singleplayer.dimensionChangePauseSeconds;
+        }
+        return DATA.dimensionChangePauseSeconds;
+    }
+
+    /**
+     * Settings profile applied only while the integrated (singleplayer/LAN) server is running.
+     * The multiplayer limits exist to protect a shared server's CPU and egress; none of that
+     * applies to a world running on the player's own machine.
+     *
+     * <p>The auto sentinels (0) resolve to {@code max(128, base value)} so enabling this profile
+     * can only ever RAISE the base radius/task limits, never silently shrink them — a profile
+     * that limited below the user's own configured values is exactly the bug this replaces.
+     * Explicit non-zero values are used verbatim, above or below the base: a setting, not a force.
+     */
+    public static class SingleplayerConfig {
+        // Master switch, exposed in Mod Menu, the settings book, and /voxygen singleplayer.
+        public boolean enableSingleplayerDefaults = true;
+        public int generationRadius = 0;  // 0 = auto: max(128, generationRadius)
+        public int maxActiveTasks = 0;    // 0 = auto: max(128, maxActiveTasks)
+        public double maxMbpsPerPlayer = 0.0; // 0 = unlimited bandwidth
+        public int dimensionChangePauseSeconds = 0; // 0 = no transition pause
+        // Generation dispatch cap in chunks/second, 0 = unlimited. The knob for FPS drain:
+        // the integrated server shares the machine with rendering, so pacing generation frees
+        // CPU for frames without shrinking the radius.
+        public int maxChunksPerSecond = 0;
+    }
+
     public static class ConfigData {
         public boolean enabled = true;
         public int generationRadius = 64;
@@ -59,6 +140,10 @@ public final class Config {
         // ~25 KB/s on the wire per player — safe for hosted servers; LAN testing can
         // `/voxygen ratelimit off`.
         public double maxMbpsPerPlayer = 2.0;
+        // Worker dispatch cap in chunks/second across all players, 0 = unlimited. Paces how fast
+        // the generation worker hands chunks to the chunk system; the semaphore (maxActiveTasks)
+        // bounds how many are in flight at once, this bounds how many start per second.
+        public int maxChunksPerSecond = 0;
         // How often (seconds) to log generation progress to the server console while chunks are
         // being generated. 0 disables the log line entirely.
         public int logProgressIntervalSeconds = 10;
@@ -72,6 +157,8 @@ public final class Config {
         // (C2ME etc.) grinding overworld generation while the End spawn area loads can stall the
         // main thread long enough for the watchdog to kill the server. 0 disables.
         public int dimensionChangePauseSeconds = 15;
+        // Singleplayer specific configuration profile (maxed out defaults for integrated server)
+        public SingleplayerConfig singleplayer = new SingleplayerConfig();
         // Player UUIDs who opted out of the auto-opening settings book (/voxygen headless on).
         // They keep the chat replies; /voxygen settings still opens the book on request.
         public java.util.List<String> headlessPlayers = new java.util.ArrayList<>();
@@ -94,3 +181,4 @@ public final class Config {
         public int refreshDefaultRadius = 16;
     }
 }
+
