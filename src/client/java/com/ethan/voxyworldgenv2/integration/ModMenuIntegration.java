@@ -26,7 +26,7 @@ public class ModMenuIntegration implements ModMenuApi {
                 .build());
 
             general.addEntry(entryBuilder.startIntSlider(Component.translatable("config.voxyworldgenv2.option.radius"), Config.DATA.generationRadius, 1, 512)
-                .setDefaultValue(128)
+                .setDefaultValue(64)
                 .setTooltip(Component.translatable("config.voxyworldgenv2.option.radius.tooltip"))
                 .setSaveConsumer(newValue -> Config.DATA.generationRadius = newValue)
                 .build());
@@ -48,7 +48,65 @@ public class ModMenuIntegration implements ModMenuApi {
                 .setTooltip(Component.translatable("config.voxyworldgenv2.option.max_active.tooltip"))
                 .setSaveConsumer(newValue -> Config.DATA.maxActiveTasks = newValue)
                 .build());
-            
+
+            general.addEntry(entryBuilder.startIntField(Component.translatable("config.voxyworldgenv2.option.gen_rate"), Config.DATA.maxChunksPerSecond)
+                .setDefaultValue(0)
+                .setMin(0)
+                .setMax(100_000)
+                .setTooltip(Component.translatable("config.voxyworldgenv2.option.gen_rate.tooltip"))
+                .setSaveConsumer(newValue -> Config.DATA.maxChunksPerSecond = newValue)
+                .build());
+
+            // Voxy itself exposes no API for third-party settings (its page is a hardcoded Sodium
+            // OptionPage), so the singleplayer profile lives here, next to everything else.
+            if (Config.DATA.singleplayer == null) {
+                Config.DATA.singleplayer = new Config.SingleplayerConfig();
+            }
+            var sp = Config.DATA.singleplayer;
+            ConfigCategory singleplayer = builder.getOrCreateCategory(Component.translatable("config.voxyworldgenv2.category.singleplayer"));
+
+            singleplayer.addEntry(entryBuilder.startBooleanToggle(Component.translatable("config.voxyworldgenv2.option.sp_enabled"), sp.enableSingleplayerDefaults)
+                .setDefaultValue(true)
+                .setTooltip(Component.translatable("config.voxyworldgenv2.option.sp_enabled.tooltip"))
+                .setSaveConsumer(newValue -> Config.DATA.singleplayer.enableSingleplayerDefaults = newValue)
+                .build());
+
+            singleplayer.addEntry(entryBuilder.startIntSlider(Component.translatable("config.voxyworldgenv2.option.sp_radius"), sp.generationRadius, 0, 512)
+                .setDefaultValue(0)
+                .setTooltip(Component.translatable("config.voxyworldgenv2.option.sp_radius.tooltip"))
+                .setSaveConsumer(newValue -> Config.DATA.singleplayer.generationRadius = newValue)
+                .build());
+
+            singleplayer.addEntry(entryBuilder.startIntSlider(Component.translatable("config.voxyworldgenv2.option.sp_tasks"), sp.maxActiveTasks, 0, 128)
+                .setDefaultValue(0)
+                .setTooltip(Component.translatable("config.voxyworldgenv2.option.sp_tasks.tooltip"))
+                .setSaveConsumer(newValue -> Config.DATA.singleplayer.maxActiveTasks = newValue)
+                .build());
+
+            singleplayer.addEntry(entryBuilder.startDoubleField(Component.translatable("config.voxyworldgenv2.option.sp_rate"), sp.maxMbpsPerPlayer)
+                .setDefaultValue(0.0)
+                .setMin(0.0)
+                .setMax(1000.0)
+                .setTooltip(Component.translatable("config.voxyworldgenv2.option.sp_rate.tooltip"))
+                .setSaveConsumer(newValue -> Config.DATA.singleplayer.maxMbpsPerPlayer = newValue)
+                .build());
+
+            singleplayer.addEntry(entryBuilder.startIntField(Component.translatable("config.voxyworldgenv2.option.sp_gen_rate"), sp.maxChunksPerSecond)
+                .setDefaultValue(0)
+                .setMin(0)
+                .setMax(100_000)
+                .setTooltip(Component.translatable("config.voxyworldgenv2.option.sp_gen_rate.tooltip"))
+                .setSaveConsumer(newValue -> Config.DATA.singleplayer.maxChunksPerSecond = newValue)
+                .build());
+
+            singleplayer.addEntry(entryBuilder.startIntField(Component.translatable("config.voxyworldgenv2.option.sp_pause"), sp.dimensionChangePauseSeconds)
+                .setDefaultValue(0)
+                .setMin(0)
+                .setMax(3600)
+                .setTooltip(Component.translatable("config.voxyworldgenv2.option.sp_pause.tooltip"))
+                .setSaveConsumer(newValue -> Config.DATA.singleplayer.dimensionChangePauseSeconds = newValue)
+                .build());
+
             builder.setSavingRunnable(() -> {
                 Config.save();
                 com.ethan.voxyworldgenv2.core.ChunkGenerationManager.getInstance().scheduleConfigReload();
