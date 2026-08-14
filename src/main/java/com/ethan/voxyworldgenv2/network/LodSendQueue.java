@@ -219,7 +219,8 @@ public final class LodSendQueue {
         // Apply the per-player cap before sending. Throttling here, on the dedicated sender
         // thread, is safe: the main thread never blocks on this, and if the backlog grows past
         // the bounded queue the excess is dropped rather than accumulating.
-        awaitBudget(player.getUUID(), bytes);
+        boolean isSingleplayer = com.ethan.voxyworldgenv2.core.ChunkGenerationManager.getInstance().isSingleplayer();
+        awaitBudget(player.getUUID(), bytes, isSingleplayer);
 
         try {
             // Fabric routes this to the connection, which hands off to the Netty event loop, so
@@ -237,8 +238,8 @@ public final class LodSendQueue {
     }
 
     /** Blocks this sender thread until the player's bandwidth budget covers {@code bytes}. */
-    private void awaitBudget(java.util.UUID id, int bytes) {
-        double mbps = com.ethan.voxyworldgenv2.core.Config.DATA.maxMbpsPerPlayer;
+    private void awaitBudget(java.util.UUID id, int bytes, boolean isSingleplayer) {
+        double mbps = com.ethan.voxyworldgenv2.core.Config.getMaxMbpsPerPlayer(isSingleplayer);
         if (mbps <= 0) return; // unlimited
 
         double bytesPerSec = (mbps * 1_000_000.0) / 8.0;

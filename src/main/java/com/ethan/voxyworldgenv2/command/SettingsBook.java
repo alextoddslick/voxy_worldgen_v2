@@ -39,7 +39,8 @@ public final class SettingsBook {
     public static void open(ServerPlayer player) {
         List<Filterable<Component>> pages = List.of(
             Filterable.passThrough(settingsPage(player)),
-            Filterable.passThrough(statsPage()));
+            Filterable.passThrough(statsPage()),
+            Filterable.passThrough(tuningPage()));
 
         ItemStack book = new ItemStack(Items.WRITTEN_BOOK);
         book.set(DataComponents.WRITTEN_BOOK_CONTENT, new WrittenBookContent(
@@ -58,6 +59,8 @@ public final class SettingsBook {
 
     private static Component settingsPage(ServerPlayer player) {
         var c = Config.DATA;
+        boolean sp = ChunkGenerationManager.getInstance().isSingleplayer();
+        boolean spOn = sp && c.singleplayer != null && c.singleplayer.enableSingleplayerDefaults;
         MutableComponent p = Component.empty();
 
         p.append(Component.literal("Voxy WorldGen\n").withStyle(ChatFormatting.DARK_PURPLE, ChatFormatting.BOLD));
@@ -71,19 +74,34 @@ public final class SettingsBook {
             "/voxygen enabled " + !c.enabled, "toggle background generation"));
         p.append(nl());
 
+        if (sp) {
+            // The unthrottled singleplayer profile: a setting, not a force. When it's on, the
+            // radius/tasks/rate buttons below edit the profile, and the shown values are its.
+            p.append(name("SP profile: "));
+            p.append(spOn
+                ? Component.literal("ON").withStyle(ChatFormatting.DARK_GREEN)
+                : Component.literal("OFF").withStyle(ChatFormatting.DARK_RED));
+            p.append(space());
+            p.append(opt(spOn ? "off" : "on",
+                "/voxygen singleplayer " + !spOn,
+                spOn ? "use the base settings and limits in this world"
+                     : "unthrottle this world (no rate cap, wide radius)"));
+            p.append(nl());
+        }
+
         p.append(name("Radius: "));
-        p.append(value(c.generationRadius + " chunks"));
+        p.append(value(Config.getGenerationRadius(sp) + " chunks"));
         p.append(nl());
         p.append(optRow("radius", "generation radius", "32", "64", "128", "256"));
 
         p.append(name("Tasks: "));
-        p.append(value(String.valueOf(c.maxActiveTasks)));
+        p.append(value(String.valueOf(Config.getMaxActiveTasks(sp))));
         p.append(nl());
         p.append(optRow("tasks", "parallel generation tasks", "10", "20", "40"));
 
+        double rate = Config.getMaxMbpsPerPlayer(sp);
         p.append(name("Rate cap: "));
-        p.append(value(c.maxMbpsPerPlayer <= 0 ? "unlimited"
-            : String.format("%.0f Mbps", c.maxMbpsPerPlayer)));
+        p.append(value(rate <= 0 ? "unlimited" : String.format("%.0f Mbps", rate)));
         p.append(nl());
         p.append(opt("2", "/voxygen ratelimit 2", "2 Mbps per player"));
         p.append(opt("10", "/voxygen ratelimit 10", "10 Mbps per player"));
@@ -91,13 +109,13 @@ public final class SettingsBook {
         p.append(opt("off", "/voxygen ratelimit off", "no bandwidth cap (LAN)"));
         p.append(nl());
 
-        p.append(name("Log every: "));
-        p.append(value(c.logProgressIntervalSeconds <= 0 ? "off" : c.logProgressIntervalSeconds + "s"));
+        int cps = Config.getMaxChunksPerSecond(sp);
+        p.append(name("Gen rate: "));
+        p.append(value(cps <= 0 ? "unlimited" : cps + " c/s"));
         p.append(nl());
-        p.append(opt("5", "/voxygen loginterval 5", "progress log every 5s"));
-        p.append(opt("10", "/voxygen loginterval 10", "progress log every 10s"));
-        p.append(opt("30", "/voxygen loginterval 30", "progress log every 30s"));
-        p.append(opt("off", "/voxygen loginterval off", "no progress logging"));
+        p.append(opt("50", "/voxygen genrate 50", "gentle: 50 chunks/s, easy on FPS"));
+        p.append(opt("200", "/voxygen genrate 200", "200 chunks/s"));
+        p.append(opt("off", "/voxygen genrate off", "generate as fast as possible"));
         p.append(nl());
 
         boolean headless = VoxyGenCommand.isHeadless(player);
@@ -111,7 +129,28 @@ public final class SettingsBook {
             headless ? "auto-open this book after changes" : "headless: stop auto-opening this book"));
         p.append(nl());
 
-        p.append(Component.literal("\nlive stats on page 2").withStyle(ChatFormatting.DARK_GRAY, ChatFormatting.ITALIC));
+        p.append(Component.literal("\nstats p2 - tuning p3").withStyle(ChatFormatting.DARK_GRAY, ChatFormatting.ITALIC));
+        return p;
+    }
+
+    /** Overflow page for the knobs that no longer fit on page 1 (a book page holds 14 lines). */
+    private static Component tuningPage() {
+        var c = Config.DATA;
+        MutableComponent p = Component.empty();
+
+        p.append(Component.literal("Tuning\n").withStyle(ChatFormatting.DARK_PURPLE, ChatFormatting.BOLD));
+
+        p.append(name("Log every: "));
+        p.append(value(c.logProgressIntervalSeconds <= 0 ? "off" : c.logProgressIntervalSeconds + "s"));
+        p.append(nl());
+        p.append(opt("5", "/voxygen loginterval 5", "progress log every 5s"));
+        p.append(opt("10", "/voxygen loginterval 10", "progress log every 10s"));
+        p.append(opt("30", "/voxygen loginterval 30", "progress log every 30s"));
+        p.append(opt("off", "/voxygen loginterval off", "no progress logging"));
+        p.append(nl());
+
+        p.append(Component.literal("\nGen rate caps chunks/s to spare FPS; radius and tasks are on page 1. In singleplayer they edit the SP profile.")
+            .withStyle(ChatFormatting.DARK_GRAY));
         return p;
     }
 
@@ -128,7 +167,8 @@ public final class SettingsBook {
         p.append(line("Done", String.valueOf(st.getCompleted())));
         p.append(line("Rate", String.format("%.1f c/s", st.getChunksPerSecond())));
         p.append(line("Left", String.valueOf(mgr.getRemainingInRadius())));
-        p.append(line("Active", mgr.getActiveTaskCount() + " / " + Config.DATA.maxActiveTasks));
+        boolean sp = mgr.isSingleplayer();
+        p.append(line("Active", mgr.getActiveTaskCount() + " / " + Config.getMaxActiveTasks(sp) + (sp ? " (SP)" : "")));
         p.append(line("Failed", String.valueOf(st.getFailed())));
         p.append(line("Send q", q.getQueuedJobs() + " / " + q.getMaxQueuedJobs()));
         p.append(line("Deferred", String.valueOf(q.getJobsDropped())));
