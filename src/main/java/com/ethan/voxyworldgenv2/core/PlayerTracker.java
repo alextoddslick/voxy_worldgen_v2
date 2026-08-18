@@ -43,6 +43,12 @@ public class PlayerTracker {
     private static final long MIN_STORAGE_REPORT_INTERVAL_MS = 10_000;
 
     /**
+     * The protocol each client acked (0 = never acked, i.e. vanilla or pre-4 mod). Decides which
+     * settings UI /voxygen settings offers: screen for ≥4, written book otherwise.
+     */
+    private final Map<UUID, Integer> clientProtocol = new ConcurrentHashMap<>();
+
+    /**
      * How many known-chunk packets this player has spent for a dimension since entering it, or
      * {@link #UPLOAD_FINISHED} once their final packet arrived. UUID -> dimension id -> count.
      *
@@ -87,6 +93,7 @@ public class PlayerTracker {
         refreshRadius.remove(id);
         knownChunksBudget.remove(id);
         clientStoreBytes.remove(id);
+        clientProtocol.remove(id);
     }
 
     /**
@@ -108,6 +115,7 @@ public class PlayerTracker {
         refreshRadius.remove(id);
         knownChunksBudget.remove(id);
         clientStoreBytes.remove(id);
+        clientProtocol.remove(id);
     }
 
     public void clear() {
@@ -117,6 +125,7 @@ public class PlayerTracker {
         refreshRadius.clear();
         knownChunksBudget.clear();
         clientStoreBytes.clear();
+        clientProtocol.clear();
     }
 
     /**
@@ -148,6 +157,7 @@ public class PlayerTracker {
                 refreshRadius.remove(entry.getKey());
                 knownChunksBudget.remove(entry.getKey());
                 clientStoreBytes.remove(entry.getKey());
+                clientProtocol.remove(entry.getKey());
                 removed++;
             } else if (live != entry.getValue()) {
                 entry.setValue(live);
@@ -193,6 +203,16 @@ public class PlayerTracker {
     public long getClientStoreBytes(UUID uuid) {
         long[] v = clientStoreBytes.get(uuid);
         return v == null ? -1 : v[0];
+    }
+
+    public void setClientProtocol(UUID uuid, int protocol) {
+        clientProtocol.put(uuid, protocol);
+    }
+
+    /** 0 when the client never acked (vanilla, or a mod older than protocol 4). */
+    public int getClientProtocol(UUID uuid) {
+        Integer v = clientProtocol.get(uuid);
+        return v == null ? 0 : v;
     }
 
     public void armGate(UUID uuid, String dimensionId) {

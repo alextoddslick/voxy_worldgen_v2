@@ -629,7 +629,13 @@ public final class VoxyGenCommand {
 
     private static int settings(CommandContext<CommandSourceStack> ctx) {
         if (ctx.getSource().getEntity() instanceof ServerPlayer player) {
-            SettingsBook.open(player);
+            // A client that acked protocol 4 has the real settings screen; everyone else keeps
+            // the written-book fallback.
+            if (PlayerTracker.getInstance().getClientProtocol(player.getUUID()) >= 4) {
+                NetworkHandler.sendSettingsSnapshot(player);
+            } else {
+                SettingsBook.open(player);
+            }
         } else {
             // console/RCON has no screen; print the same information as text
             status(ctx);
@@ -639,10 +645,12 @@ public final class VoxyGenCommand {
 
     /**
      * In-game sources get the settings book re-opened so the change is visible immediately —
-     * unless the player opted out with {@code /voxygen headless on}.
+     * unless the player opted out with {@code /voxygen headless on}, or their client has the
+     * settings screen (a book popping over it would be noise; the chat reply suffices).
      */
     private static void maybeShowBook(CommandContext<CommandSourceStack> ctx) {
-        if (ctx.getSource().getEntity() instanceof ServerPlayer player && !isHeadless(player)) {
+        if (ctx.getSource().getEntity() instanceof ServerPlayer player && !isHeadless(player)
+                && PlayerTracker.getInstance().getClientProtocol(player.getUUID()) < 4) {
             SettingsBook.open(player);
         }
     }

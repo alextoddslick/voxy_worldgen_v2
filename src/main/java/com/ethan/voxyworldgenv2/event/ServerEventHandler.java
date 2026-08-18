@@ -22,6 +22,17 @@ public final class ServerEventHandler {
     
     public static void onServerStopping(MinecraftServer server) {
         VoxyWorldGenV2.LOGGER.info("server stopping, shutting down manager");
+        // Fold every online player's session into the history before the tracker is cleared, or
+        // a stop with players online loses their traffic from the admin table.
+        var history = com.ethan.voxyworldgenv2.core.PlayerHistory.getInstance();
+        var wire = com.ethan.voxyworldgenv2.network.LodSendQueue.getInstance().getPerPlayerWireBytes();
+        long now = System.currentTimeMillis();
+        for (ServerPlayer p : PlayerTracker.getInstance().getPlayers()) {
+            history.recordSession(p.getUUID(), p.getName().getString(),
+                wire.getOrDefault(p.getUUID(), 0L),
+                PlayerTracker.getInstance().getClientStoreBytes(p.getUUID()), now);
+        }
+        history.save();
         ChunkGenerationManager.getInstance().shutdown();
         PlayerTracker.getInstance().clear();
     }
@@ -35,7 +46,17 @@ public final class ServerEventHandler {
     }
     
     public static void onPlayerDisconnect(ServerGamePacketListenerImpl handler, MinecraftServer server) {
-        PlayerTracker.getInstance().removePlayer(handler.getPlayer());
+        ServerPlayer player = handler.getPlayer();
+        // Persist the session's traffic/disk figures BEFORE the tracker forgets the player, so
+        // the admin table keeps offline rows across restarts.
+        var history = com.ethan.voxyworldgenv2.core.PlayerHistory.getInstance();
+        history.recordSession(player.getUUID(), player.getName().getString(),
+            com.ethan.voxyworldgenv2.network.LodSendQueue.getInstance().getPerPlayerWireBytes()
+                .getOrDefault(player.getUUID(), 0L),
+            PlayerTracker.getInstance().getClientStoreBytes(player.getUUID()),
+            System.currentTimeMillis());
+        history.save();
+        PlayerTracker.getInstance().removePlayer(player);
     }
     
     public static void onServerTick(MinecraftServer server) {

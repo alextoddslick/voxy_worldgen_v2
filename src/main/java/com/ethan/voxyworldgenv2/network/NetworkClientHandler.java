@@ -23,12 +23,31 @@ public class NetworkClientHandler {
             context.client().execute(() -> {
                 NetworkState.setServerConnected(serverHasMod);
                 NetworkState.setServerProtocol(protocol);
+                // Ack so the server knows this client can show the settings screen. Gated on the
+                // server's own version: a pre-4 server has not registered the payload and an
+                // unknown serverbound channel can drop the connection.
+                if (protocol >= 4 && ClientPlayNetworking.canSend(NetworkHandler.HandshakeAckPayload.TYPE)) {
+                    ClientPlayNetworking.send(new NetworkHandler.HandshakeAckPayload(NetworkHandler.PROTOCOL_VERSION));
+                }
             });
         });
 
         ClientPlayNetworking.registerGlobalReceiver(NetworkHandler.LODDataPayload.TYPE, (payload, context) -> {
             context.client().execute(() -> {
                 handleLODData(payload);
+            });
+        });
+
+        ClientPlayNetworking.registerGlobalReceiver(NetworkHandler.SettingsSnapshotPayload.TYPE, (payload, context) -> {
+            context.client().execute(() -> {
+                var mc = context.client();
+                // A snapshot either opens the screen or refreshes the one already showing (the
+                // server sends a fresh one after every applied update).
+                if (mc.screen instanceof com.ethan.voxyworldgenv2.client.VoxyWorldGenSettingsScreen screen) {
+                    screen.refresh(payload);
+                } else {
+                    mc.setScreen(new com.ethan.voxyworldgenv2.client.VoxyWorldGenSettingsScreen(payload));
+                }
             });
         });
     }
