@@ -10,7 +10,10 @@
     "ServerLevelMixin",
     "BlockUpdateMixin"
   ],
-  "client": [],
+  "client": [
+    "GuiTabListMixin",
+    "PlayerTabOverlayAccessor"
+  ],
   "injectors": {
     "defaultRequire": 1
   }
