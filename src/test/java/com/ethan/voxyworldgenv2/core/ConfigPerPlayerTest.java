@@ -112,7 +112,8 @@ class ConfigPerPlayerTest {
     @Test
     void hudTogglesDefaultToEverythingVisible() {
         // The toggles exist to let the user hide stats, so a fresh install shows them all.
-        assertTrue(Config.DATA.hudShowRaw);
+        // (raw was removed entirely 2026-08-18: wire bytes are the traffic truth, and the zip
+        // ratio covers the "how compressible" question without a raw line.)
         assertTrue(Config.DATA.hudShowCompressed);
         assertTrue(Config.DATA.hudShowSavings);
         assertTrue(Config.DATA.hudShowClientDisk);

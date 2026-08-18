@@ -163,7 +163,6 @@ public final class SettingsBook {
         // HUD stat toggles: what the tab HUD and /voxygen traffic render per player
         p.append(name("HUD stats:"));
         p.append(nl());
-        p.append(hudToggle("raw", c.hudShowRaw, "pre-compression bytes"));
         p.append(hudToggle("wire", c.hudShowCompressed, "compressed bytes actually sent"));
         p.append(hudToggle("zip", c.hudShowSavings, "compression ratio and bytes saved"));
         p.append(hudToggle("disk", c.hudShowClientDisk, "each client's Voxy store size"));
@@ -204,8 +203,7 @@ public final class SettingsBook {
         p.append(line("Failed", String.valueOf(st.getFailed())));
         p.append(line("Send q", q.getQueuedJobs() + " / " + q.getMaxQueuedJobs()));
         p.append(line("Deferred", String.valueOf(q.getJobsDropped())));
-        p.append(line("Sent", human(q.getWireBytesSent()) + " wire"
-            + (Config.DATA.hudShowRaw ? " / " + human(q.getBytesSent()) + " raw" : "")));
+        p.append(line("Sent", human(q.getWireBytesSent()) + " wire"));
         long raw = com.ethan.voxyworldgenv2.network.NetworkHandler.RAW_SECTION_BYTES.get();
         long wire = com.ethan.voxyworldgenv2.network.NetworkHandler.WIRE_SECTION_BYTES.get();
         if (Config.DATA.hudShowSavings && raw > 0 && wire > 0) {

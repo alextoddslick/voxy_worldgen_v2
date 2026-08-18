@@ -21,7 +21,7 @@ Beyond the version downgrade, this branch adds server-operations features on top
 queue with backpressure and per-player bandwidth caps (`/voxygen ratelimit [player]`), a configurable
 LOD send distance with per-player overrides (`/voxygen senddistance [player]`), whole-batch zlib
 compression of LOD payloads with wire-accurate throttling and accounting, HUD stat toggles
-(`/voxygen hud raw|compressed|savings|clientdisk`), a client disk-usage report (each client tells the
+(`/voxygen hud compressed|savings|clientdisk`), a client disk-usage report (each client tells the
 server how big its Voxy store is, protocol 3), periodic generation progress logging, a virtual-book
 settings UI, and a tab-list HUD.
 

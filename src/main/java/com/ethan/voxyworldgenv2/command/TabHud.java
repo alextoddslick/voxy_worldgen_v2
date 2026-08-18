@@ -100,9 +100,6 @@ public final class TabHud {
         long wire = NetworkHandler.WIRE_SECTION_BYTES.get();
         StringBuilder pipeline = new StringBuilder(String.format("queue %d/%d · %s wire",
             q.getQueuedJobs(), q.getMaxQueuedJobs(), rate(q.getCurrentWireBytesPerSecond())));
-        if (c.hudShowRaw) {
-            pipeline.append(String.format(" · %s raw", rate(q.getCurrentBytesPerSecond())));
-        }
         if (c.hudShowSavings && raw > 0 && wire > 0) {
             pipeline.append(String.format(" · zip %.1fx (%s saved)", (double) raw / wire, human(raw - wire)));
         }
@@ -127,9 +124,6 @@ public final class TabHud {
         StringBuilder line = new StringBuilder(": ");
         if (c.hudShowCompressed) {
             line.append(human(q.getPerPlayerWireBytes().getOrDefault(p.getUUID(), 0L))).append(" received · ");
-        }
-        if (c.hudShowRaw) {
-            line.append(human(q.getPerPlayerBytes().getOrDefault(p.getUUID(), 0L))).append(" raw · ");
         }
         if (c.hudShowClientDisk) {
             long disk = PlayerTracker.getInstance().getClientStoreBytes(p.getUUID());

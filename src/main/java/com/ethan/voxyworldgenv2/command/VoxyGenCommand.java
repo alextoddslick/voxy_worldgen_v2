@@ -359,11 +359,10 @@ public final class VoxyGenCommand {
         return 1;
     }
 
-    private static final String[] HUD_STATS = {"raw", "compressed", "savings", "clientdisk"};
+    private static final String[] HUD_STATS = {"compressed", "savings", "clientdisk"};
 
     private static boolean getHudToggle(String stat) {
         return switch (stat) {
-            case "raw" -> Config.DATA.hudShowRaw;
             case "compressed" -> Config.DATA.hudShowCompressed;
             case "savings" -> Config.DATA.hudShowSavings;
             case "clientdisk" -> Config.DATA.hudShowClientDisk;
@@ -373,7 +372,6 @@ public final class VoxyGenCommand {
 
     private static int setHudToggle(CommandContext<CommandSourceStack> ctx, String stat, boolean value) {
         switch (stat) {
-            case "raw" -> Config.DATA.hudShowRaw = value;
             case "compressed" -> Config.DATA.hudShowCompressed = value;
             case "savings" -> Config.DATA.hudShowSavings = value;
             case "clientdisk" -> Config.DATA.hudShowClientDisk = value;
@@ -387,8 +385,8 @@ public final class VoxyGenCommand {
 
     private static int showHudToggles(CommandContext<CommandSourceStack> ctx) {
         reply(ctx, "§6HUD stats§r  (toggle with /voxygen hud <stat> <true|false>)");
-        reply(ctx, String.format("  raw %s   compressed %s   savings %s   clientdisk %s",
-            onOff(Config.DATA.hudShowRaw), onOff(Config.DATA.hudShowCompressed),
+        reply(ctx, String.format("  compressed %s   savings %s   clientdisk %s",
+            onOff(Config.DATA.hudShowCompressed),
             onOff(Config.DATA.hudShowSavings), onOff(Config.DATA.hudShowClientDisk)));
         return 1;
     }
@@ -501,21 +499,20 @@ public final class VoxyGenCommand {
 
     private static int traffic(CommandContext<CommandSourceStack> ctx) {
         var q = LodSendQueue.getInstance();
-        long bps = q.getCurrentBytesPerSecond();
 
         reply(ctx, "§6LOD traffic§r");
         long raw = NetworkHandler.RAW_SECTION_BYTES.get();
         long wire = NetworkHandler.WIRE_SECTION_BYTES.get();
-        if (wire > 0) {
-            reply(ctx, String.format("  on the wire: §b%s§r over %d packets  (was %s raw, §a%.1fx§r smaller)",
-                humanBytes(wire), q.getPacketsSent(), humanBytes(raw), raw > 0 ? (double) raw / wire : 0.0));
+        if (wire > 0 && raw > 0 && Config.DATA.hudShowSavings) {
+            reply(ctx, String.format("  on the wire: §b%s§r over %d packets  (§a%.1fx§r smaller than the source data)",
+                humanBytes(wire), q.getPacketsSent(), (double) raw / wire));
         } else {
-            reply(ctx, String.format("  total sent : §b%s§r over %d packets",
-                humanBytes(q.getBytesSent()), q.getPacketsSent()));
+            reply(ctx, String.format("  on the wire: §b%s§r over %d packets",
+                humanBytes(q.getWireBytesSent()), q.getPacketsSent()));
         }
         long wireBps = q.getCurrentWireBytesPerSecond();
-        reply(ctx, String.format("  now        : §b%.2f MB/s§r on the wire  (%.2f Mbps; %.2f MB/s raw)",
-            wireBps / 1_000_000.0, (wireBps * 8.0) / 1_000_000.0, bps / 1_000_000.0));
+        reply(ctx, String.format("  now        : §b%.2f MB/s§r on the wire  (%.2f Mbps)",
+            wireBps / 1_000_000.0, (wireBps * 8.0) / 1_000_000.0));
         boolean sp = ChunkGenerationManager.getInstance().isSingleplayer();
         double limit = Config.getMaxMbpsPerPlayer(sp);
         reply(ctx, String.format("  limit      : %s",
@@ -530,7 +527,6 @@ public final class VoxyGenCommand {
             reply(ctx, "  no per-player traffic yet");
             return 1;
         }
-        var perRaw = q.getPerPlayerBytes();
         var c = Config.DATA;
         reply(ctx, "  per player:");
         var server = ctx.getSource().getServer();
@@ -542,7 +538,6 @@ public final class VoxyGenCommand {
                 String name = p != null ? p.getName().getString() : e.getKey().toString().substring(0, 8) + " (gone)";
                 StringBuilder line = new StringBuilder(String.format("    %-18s", name));
                 if (c.hudShowCompressed) line.append(String.format(" §b%s§r wire", humanBytes(e.getValue())));
-                if (c.hudShowRaw) line.append(String.format("  %s raw", humanBytes(perRaw.getOrDefault(e.getKey(), 0L))));
                 long disk = PlayerTracker.getInstance().getClientStoreBytes(e.getKey());
                 if (c.hudShowClientDisk && disk >= 0) line.append(String.format("  §3%s on disk§r", humanBytes(disk)));
                 Double rl = c.playerRateLimits != null ? c.playerRateLimits.get(e.getKey().toString()) : null;

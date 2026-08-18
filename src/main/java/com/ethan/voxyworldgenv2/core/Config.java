@@ -206,7 +206,6 @@ public final class Config {
         public java.util.Map<String, Integer> playerSendDistances = new java.util.HashMap<>();
         // Which traffic stats the tab HUD and /voxygen traffic render. All on by default; these
         // exist to let an operator declutter, not to hide the accounting.
-        public boolean hudShowRaw = true;
         public boolean hudShowCompressed = true;
         public boolean hudShowSavings = true;
         public boolean hudShowClientDisk = true;

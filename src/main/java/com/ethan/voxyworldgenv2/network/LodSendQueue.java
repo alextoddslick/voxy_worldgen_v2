@@ -54,21 +54,19 @@ public final class LodSendQueue {
     private final ArrayBlockingQueue<Job> queue = new ArrayBlockingQueue<>(MAX_QUEUED_JOBS);
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicLong packetsSent = new AtomicLong();
-    private final AtomicLong bytesSent = new AtomicLong();
     private final AtomicLong wireBytesSent = new AtomicLong();
     private final AtomicInteger jobsDropped = new AtomicInteger();
     private final AtomicLong throttleWaitMillis = new AtomicLong();
     private volatile Thread worker;
 
     /**
-     * Per-player lifetime totals, keyed by UUID so a reconnect does not resurrect a stale entry.
-     * [0] = raw (pre-compression) bytes, [1] = deflated bytes actually sent.
+     * Per-player lifetime wire (post-deflate) bytes, keyed by UUID so a reconnect does not
+     * resurrect a stale entry.
      */
     private final java.util.Map<java.util.UUID, long[]> perPlayerBytes = new java.util.concurrent.ConcurrentHashMap<>();
     /** Per-player token buckets for the bandwidth cap. */
     private final java.util.Map<java.util.UUID, Bucket> buckets = new java.util.concurrent.ConcurrentHashMap<>();
 
-    private final long[] rateWindow = new long[RATE_WINDOW_SECONDS];
     private final long[] wireRateWindow = new long[RATE_WINDOW_SECONDS];
     private long rateWindowEpochSecond = 0;
 
@@ -126,7 +124,6 @@ public final class LodSendQueue {
         }
         queue.clear();
         packetsSent.set(0);
-        bytesSent.set(0);
         wireBytesSent.set(0);
         jobsDropped.set(0);
         throttleWaitMillis.set(0);
@@ -240,12 +237,9 @@ public final class LodSendQueue {
             // calling from this thread is safe.
             ServerPlayNetworking.send(player, payload);
             packetsSent.incrementAndGet();
-            bytesSent.addAndGet(bytes);
             wireBytesSent.addAndGet(wire);
-            recordRate(bytes, wire);
-            long[] totals = perPlayerBytes.computeIfAbsent(player.getUUID(), k -> new long[2]);
-            totals[0] += bytes;
-            totals[1] += wire;
+            recordRate(wire);
+            perPlayerBytes.computeIfAbsent(player.getUUID(), k -> new long[1])[0] += wire;
         } catch (Throwable t) {
             // A player disconnecting mid-send is normal, not an error worth spamming about.
             VoxyWorldGenV2.LOGGER.debug("dropped LOD packet for {}", player.getName().getString(), t);
@@ -295,24 +289,17 @@ public final class LodSendQueue {
         }
     }
 
-    private synchronized void recordRate(int bytes, int wireBytes) {
+    private synchronized void recordRate(int wireBytes) {
         long sec = System.nanoTime() / 1_000_000_000L;
         if (sec != rateWindowEpochSecond) {
             long gap = Math.min(sec - rateWindowEpochSecond, RATE_WINDOW_SECONDS);
             for (long i = 0; i < gap; i++) {
                 rateWindowEpochSecond++;
-                rateWindow[(int) (rateWindowEpochSecond % RATE_WINDOW_SECONDS)] = 0;
                 wireRateWindow[(int) (rateWindowEpochSecond % RATE_WINDOW_SECONDS)] = 0;
             }
             rateWindowEpochSecond = sec;
         }
-        rateWindow[(int) (sec % RATE_WINDOW_SECONDS)] += bytes;
         wireRateWindow[(int) (sec % RATE_WINDOW_SECONDS)] += wireBytes;
-    }
-
-    /** Average raw (pre-compression) bytes/sec over the rolling window. */
-    public synchronized long getCurrentBytesPerSecond() {
-        return windowAverage(rateWindow);
     }
 
     /** Average wire (post-deflate) bytes/sec over the rolling window. */
@@ -332,17 +319,10 @@ public final class LodSendQueue {
         return total / RATE_WINDOW_SECONDS;
     }
 
-    /** Raw (pre-compression) lifetime bytes per player. */
-    public java.util.Map<java.util.UUID, Long> getPerPlayerBytes() {
-        java.util.Map<java.util.UUID, Long> out = new java.util.HashMap<>();
-        perPlayerBytes.forEach((k, v) -> out.put(k, v[0]));
-        return out;
-    }
-
     /** Wire (post-deflate) lifetime bytes per player. */
     public java.util.Map<java.util.UUID, Long> getPerPlayerWireBytes() {
         java.util.Map<java.util.UUID, Long> out = new java.util.HashMap<>();
-        perPlayerBytes.forEach((k, v) -> out.put(k, v[1]));
+        perPlayerBytes.forEach((k, v) -> out.put(k, v[0]));
         return out;
     }
 
@@ -360,10 +340,6 @@ public final class LodSendQueue {
 
     public long getPacketsSent() {
         return packetsSent.get();
-    }
-
-    public long getBytesSent() {
-        return bytesSent.get();
     }
 
     public long getWireBytesSent() {
