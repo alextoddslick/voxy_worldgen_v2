@@ -93,34 +93,61 @@ public final class TabHud {
             st.getCompleted(), remaining, Config.DATA.generationRadius)).withStyle(ChatFormatting.GRAY));
         f.append(nl());
 
-        // pipeline line
+        // pipeline line: the headline rate is what actually crosses the network; raw and the zip
+        // factor appear when their toggles are on
+        var c = Config.DATA;
         long raw = NetworkHandler.RAW_SECTION_BYTES.get();
         long wire = NetworkHandler.WIRE_SECTION_BYTES.get();
-        String zip = (raw > 0 && wire > 0) ? String.format(" · zip %.1fx", (double) raw / wire) : "";
-        f.append(Component.literal(String.format("queue %d/%d · %s%s",
-                q.getQueuedJobs(), q.getMaxQueuedJobs(), rate(q.getCurrentBytesPerSecond()), zip))
-            .withStyle(ChatFormatting.DARK_AQUA));
+        StringBuilder pipeline = new StringBuilder(String.format("queue %d/%d · %s wire",
+            q.getQueuedJobs(), q.getMaxQueuedJobs(), rate(q.getCurrentWireBytesPerSecond())));
+        if (c.hudShowRaw) {
+            pipeline.append(String.format(" · %s raw", rate(q.getCurrentBytesPerSecond())));
+        }
+        if (c.hudShowSavings && raw > 0 && wire > 0) {
+            pipeline.append(String.format(" · zip %.1fx (%s saved)", (double) raw / wire, human(raw - wire)));
+        }
+        f.append(Component.literal(pipeline.toString()).withStyle(ChatFormatting.DARK_AQUA));
         f.append(nl());
 
         // per-player lines: traffic + synced chunk counts, viewer first
-        var perBytes = q.getPerPlayerBytes();
-        f.append(playerLine(viewer, perBytes.getOrDefault(viewer.getUUID(), 0L), true));
+        f.append(playerLine(viewer, q, true));
         for (ServerPlayer p : PlayerTracker.getInstance().getPlayers()) {
             if (p.getUUID().equals(viewer.getUUID())) continue;
             f.append(nl());
-            f.append(playerLine(p, perBytes.getOrDefault(p.getUUID(), 0L), false));
+            f.append(playerLine(p, q, false));
         }
         return f;
     }
 
-    private static Component playerLine(ServerPlayer p, long bytes, boolean isViewer) {
+    private static Component playerLine(ServerPlayer p, LodSendQueue q, boolean isViewer) {
+        var c = Config.DATA;
         var synced = PlayerTracker.getInstance().getSyncedChunks(p.getUUID(), p.level().dimension());
         int syncedCount = synced != null ? synced.size() : 0;
+
+        StringBuilder line = new StringBuilder(": ");
+        if (c.hudShowCompressed) {
+            line.append(human(q.getPerPlayerWireBytes().getOrDefault(p.getUUID(), 0L))).append(" received · ");
+        }
+        if (c.hudShowRaw) {
+            line.append(human(q.getPerPlayerBytes().getOrDefault(p.getUUID(), 0L))).append(" raw · ");
+        }
+        if (c.hudShowClientDisk) {
+            long disk = PlayerTracker.getInstance().getClientStoreBytes(p.getUUID());
+            if (disk >= 0) line.append(human(disk)).append(" on disk · ");
+        }
+        line.append(String.format("%,d chunks synced", syncedCount));
+
+        // overrides are worth a marker even with stats hidden: they explain why one player
+        // streams slower or sees less than everyone else
+        Double rl = c.playerRateLimits != null ? c.playerRateLimits.get(p.getUUID().toString()) : null;
+        if (rl != null) line.append(rl <= 0 ? " · uncapped" : String.format(" · cap %.1f Mbps", rl));
+        Integer sd = c.playerSendDistances != null ? c.playerSendDistances.get(p.getUUID().toString()) : null;
+        if (sd != null) line.append(sd <= 0 ? " · dist ∞" : String.format(" · dist %d", sd));
+
         return Component.empty()
             .append(Component.literal(isViewer ? "you" : p.getName().getString())
                 .withStyle(isViewer ? ChatFormatting.WHITE : ChatFormatting.GRAY))
-            .append(Component.literal(String.format(": %s received · %,d chunks synced",
-                human(bytes), syncedCount)).withStyle(ChatFormatting.DARK_GRAY));
+            .append(Component.literal(line.toString()).withStyle(ChatFormatting.DARK_GRAY));
     }
 
     private static Component nl() { return Component.literal("\n"); }

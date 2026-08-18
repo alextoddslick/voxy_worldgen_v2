@@ -46,6 +46,11 @@ public class NetworkState {
         return serverConnected && serverProtocol >= 2;
     }
 
+    /** The server registered the storage-report payload (protocol 3). */
+    public static boolean supportsStorageReport() {
+        return serverConnected && serverProtocol >= 3;
+    }
+
     public static void incrementReceived(long bytes) {
         chunksReceived.incrementAndGet();
         bytesReceived.addAndGet(bytes);

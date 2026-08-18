@@ -33,6 +33,16 @@ public class PlayerTracker {
     private final Map<UUID, Map<String, Integer>> refreshRadius = new ConcurrentHashMap<>();
 
     /**
+     * The client's self-reported Voxy store size for this world: [0] = bytes, [1] = millis of the
+     * last accepted report. One array per player so the accept-throttle and the value can't drift
+     * apart under concurrent packets.
+     */
+    private final Map<UUID, long[]> clientStoreBytes = new ConcurrentHashMap<>();
+
+    /** An honest client reports once a minute; anything much faster is a packet hose. */
+    private static final long MIN_STORAGE_REPORT_INTERVAL_MS = 10_000;
+
+    /**
      * How many known-chunk packets this player has spent for a dimension since entering it, or
      * {@link #UPLOAD_FINISHED} once their final packet arrived. UUID -> dimension id -> count.
      *
@@ -76,6 +86,7 @@ public class PlayerTracker {
         awaitingKnownSet.remove(id);
         refreshRadius.remove(id);
         knownChunksBudget.remove(id);
+        clientStoreBytes.remove(id);
     }
 
     /**
@@ -96,6 +107,7 @@ public class PlayerTracker {
         awaitingKnownSet.remove(id);
         refreshRadius.remove(id);
         knownChunksBudget.remove(id);
+        clientStoreBytes.remove(id);
     }
 
     public void clear() {
@@ -104,6 +116,7 @@ public class PlayerTracker {
         awaitingKnownSet.clear();
         refreshRadius.clear();
         knownChunksBudget.clear();
+        clientStoreBytes.clear();
     }
 
     /**
@@ -134,6 +147,7 @@ public class PlayerTracker {
                 awaitingKnownSet.remove(entry.getKey());
                 refreshRadius.remove(entry.getKey());
                 knownChunksBudget.remove(entry.getKey());
+                clientStoreBytes.remove(entry.getKey());
                 removed++;
             } else if (live != entry.getValue()) {
                 entry.setValue(live);
@@ -164,6 +178,21 @@ public class PlayerTracker {
     public void clearRefreshRadius(UUID uuid, String dimensionId) {
         Map<String, Integer> byDim = refreshRadius.get(uuid);
         if (byDim != null) byDim.remove(dimensionId);
+    }
+
+    /** Accepts a client storage report unless one already arrived within the throttle window. */
+    public void reportClientStoreBytes(UUID uuid, long bytes) {
+        long now = System.currentTimeMillis();
+        clientStoreBytes.compute(uuid, (k, v) -> {
+            if (v != null && now - v[1] < MIN_STORAGE_REPORT_INTERVAL_MS) return v;
+            return new long[]{bytes, now};
+        });
+    }
+
+    /** The client's last reported store size in bytes, or -1 if this player never reported one. */
+    public long getClientStoreBytes(UUID uuid) {
+        long[] v = clientStoreBytes.get(uuid);
+        return v == null ? -1 : v[0];
     }
 
     public void armGate(UUID uuid, String dimensionId) {

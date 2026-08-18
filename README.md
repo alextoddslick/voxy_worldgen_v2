@@ -18,8 +18,12 @@ that Voxy build (or a compatible one) on the client for LODs to render.
 
 Beyond the version downgrade, this branch adds server-operations features on top of upstream:
 `/voxygen` admin commands (status, traffic, rate limiting, refresh, live reload), an off-thread LOD send
-queue with backpressure and per-player bandwidth caps, whole-batch zlib compression of LOD
-payloads, periodic generation progress logging, a virtual-book settings UI, and a tab-list HUD.
+queue with backpressure and per-player bandwidth caps (`/voxygen ratelimit [player]`), a configurable
+LOD send distance with per-player overrides (`/voxygen senddistance [player]`), whole-batch zlib
+compression of LOD payloads with wire-accurate throttling and accounting, HUD stat toggles
+(`/voxygen hud raw|compressed|savings|clientdisk`), a client disk-usage report (each client tells the
+server how big its Voxy store is, protocol 3), periodic generation progress logging, a virtual-book
+settings UI, and a tab-list HUD.
 
 ## Features
 

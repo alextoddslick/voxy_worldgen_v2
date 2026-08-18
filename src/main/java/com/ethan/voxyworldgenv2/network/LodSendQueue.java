@@ -55,16 +55,21 @@ public final class LodSendQueue {
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicLong packetsSent = new AtomicLong();
     private final AtomicLong bytesSent = new AtomicLong();
+    private final AtomicLong wireBytesSent = new AtomicLong();
     private final AtomicInteger jobsDropped = new AtomicInteger();
     private final AtomicLong throttleWaitMillis = new AtomicLong();
     private volatile Thread worker;
 
-    /** Per-player lifetime totals, keyed by UUID so a reconnect does not resurrect a stale entry. */
+    /**
+     * Per-player lifetime totals, keyed by UUID so a reconnect does not resurrect a stale entry.
+     * [0] = raw (pre-compression) bytes, [1] = deflated bytes actually sent.
+     */
     private final java.util.Map<java.util.UUID, long[]> perPlayerBytes = new java.util.concurrent.ConcurrentHashMap<>();
     /** Per-player token buckets for the bandwidth cap. */
     private final java.util.Map<java.util.UUID, Bucket> buckets = new java.util.concurrent.ConcurrentHashMap<>();
 
     private final long[] rateWindow = new long[RATE_WINDOW_SECONDS];
+    private final long[] wireRateWindow = new long[RATE_WINDOW_SECONDS];
     private long rateWindowEpochSecond = 0;
 
     /**
@@ -122,6 +127,7 @@ public final class LodSendQueue {
         queue.clear();
         packetsSent.set(0);
         bytesSent.set(0);
+        wireBytesSent.set(0);
         jobsDropped.set(0);
         throttleWaitMillis.set(0);
         perPlayerBytes.clear();
@@ -216,30 +222,44 @@ public final class LodSendQueue {
 
     private void dispatch(Job job, ServerPlayer player,
                           List<NetworkHandler.LODDataPayload.SectionData> batch, int bytes) {
+        // Compress first, throttle second: the payload is built (and deflated) before the budget
+        // wait so the token bucket can charge what actually crosses the network. Budgeting raw
+        // bytes made a 2 Mbps cap throttle at ~0.4 Mbps real traffic.
+        NetworkHandler.LODDataPayload payload =
+            NetworkHandler.LODDataPayload.of(job.dimension(), job.pos(), job.minY(), batch);
+        int wire = payload.wireSize();
+
         // Apply the per-player cap before sending. Throttling here, on the dedicated sender
         // thread, is safe: the main thread never blocks on this, and if the backlog grows past
         // the bounded queue the excess is dropped rather than accumulating.
         boolean isSingleplayer = com.ethan.voxyworldgenv2.core.ChunkGenerationManager.getInstance().isSingleplayer();
-        awaitBudget(player.getUUID(), bytes, isSingleplayer);
+        awaitBudget(player.getUUID(), wire, isSingleplayer);
 
         try {
             // Fabric routes this to the connection, which hands off to the Netty event loop, so
             // calling from this thread is safe.
-            ServerPlayNetworking.send(player,
-                new NetworkHandler.LODDataPayload(job.dimension(), job.pos(), job.minY(), batch));
+            ServerPlayNetworking.send(player, payload);
             packetsSent.incrementAndGet();
             bytesSent.addAndGet(bytes);
-            recordRate(bytes);
-            perPlayerBytes.computeIfAbsent(player.getUUID(), k -> new long[1])[0] += bytes;
+            wireBytesSent.addAndGet(wire);
+            recordRate(bytes, wire);
+            long[] totals = perPlayerBytes.computeIfAbsent(player.getUUID(), k -> new long[2]);
+            totals[0] += bytes;
+            totals[1] += wire;
         } catch (Throwable t) {
             // A player disconnecting mid-send is normal, not an error worth spamming about.
             VoxyWorldGenV2.LOGGER.debug("dropped LOD packet for {}", player.getName().getString(), t);
         }
     }
 
-    /** Blocks this sender thread until the player's bandwidth budget covers {@code bytes}. */
+    /**
+     * Blocks this sender thread until the player's bandwidth budget covers {@code bytes}, which
+     * are WIRE bytes (post-deflate) — the cap is a promise about network traffic, not about how
+     * much terrain was serialised to produce it. A per-player override set via
+     * {@code /voxygen ratelimit <player>} beats the global/singleplayer value.
+     */
     private void awaitBudget(java.util.UUID id, int bytes, boolean isSingleplayer) {
-        double mbps = com.ethan.voxyworldgenv2.core.Config.getMaxMbpsPerPlayer(isSingleplayer);
+        double mbps = com.ethan.voxyworldgenv2.core.Config.getMaxMbpsForPlayer(id, isSingleplayer);
         if (mbps <= 0) return; // unlimited
 
         double bytesPerSec = (mbps * 1_000_000.0) / 8.0;
@@ -275,35 +295,54 @@ public final class LodSendQueue {
         }
     }
 
-    private synchronized void recordRate(int bytes) {
+    private synchronized void recordRate(int bytes, int wireBytes) {
         long sec = System.nanoTime() / 1_000_000_000L;
         if (sec != rateWindowEpochSecond) {
             long gap = Math.min(sec - rateWindowEpochSecond, RATE_WINDOW_SECONDS);
             for (long i = 0; i < gap; i++) {
                 rateWindowEpochSecond++;
                 rateWindow[(int) (rateWindowEpochSecond % RATE_WINDOW_SECONDS)] = 0;
+                wireRateWindow[(int) (rateWindowEpochSecond % RATE_WINDOW_SECONDS)] = 0;
             }
             rateWindowEpochSecond = sec;
         }
         rateWindow[(int) (sec % RATE_WINDOW_SECONDS)] += bytes;
+        wireRateWindow[(int) (sec % RATE_WINDOW_SECONDS)] += wireBytes;
     }
 
-    /** Average bytes/sec over the rolling window. */
+    /** Average raw (pre-compression) bytes/sec over the rolling window. */
     public synchronized long getCurrentBytesPerSecond() {
+        return windowAverage(rateWindow);
+    }
+
+    /** Average wire (post-deflate) bytes/sec over the rolling window. */
+    public synchronized long getCurrentWireBytesPerSecond() {
+        return windowAverage(wireRateWindow);
+    }
+
+    private long windowAverage(long[] window) {
         long sec = System.nanoTime() / 1_000_000_000L;
         long total = 0;
         // Skip the in-progress second so the figure is not artificially low.
         for (int i = 1; i <= RATE_WINDOW_SECONDS; i++) {
             long s = sec - i;
             if (s < 0) continue;
-            total += rateWindow[(int) (s % RATE_WINDOW_SECONDS)];
+            total += window[(int) (s % RATE_WINDOW_SECONDS)];
         }
         return total / RATE_WINDOW_SECONDS;
     }
 
+    /** Raw (pre-compression) lifetime bytes per player. */
     public java.util.Map<java.util.UUID, Long> getPerPlayerBytes() {
         java.util.Map<java.util.UUID, Long> out = new java.util.HashMap<>();
         perPlayerBytes.forEach((k, v) -> out.put(k, v[0]));
+        return out;
+    }
+
+    /** Wire (post-deflate) lifetime bytes per player. */
+    public java.util.Map<java.util.UUID, Long> getPerPlayerWireBytes() {
+        java.util.Map<java.util.UUID, Long> out = new java.util.HashMap<>();
+        perPlayerBytes.forEach((k, v) -> out.put(k, v[1]));
         return out;
     }
 
@@ -325,6 +364,10 @@ public final class LodSendQueue {
 
     public long getBytesSent() {
         return bytesSent.get();
+    }
+
+    public long getWireBytesSent() {
+        return wireBytesSent.get();
     }
 
     public int getJobsDropped() {
