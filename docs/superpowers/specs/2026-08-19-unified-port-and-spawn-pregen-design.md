@@ -138,6 +138,13 @@ unified's client-side drain queue (96 sections/tick, nearest-first) on top of it
 LOD burst ingested synchronously stutters the client. Unified's uncompressed `List<SectionData>`
 payload and its `SEND_POOL` are discarded.
 
+**Two unified-only improvements must survive the swap.** This was missed on the first pass and
+inverts the obvious reading: the fork does *not* have a finer-grained update path that unified
+lacks. The fork's `ChunkUpdateTracker.markDirty(LevelChunk)` takes no `blockY` and calls the
+full-chunk `broadcastLODData(chunk)`, so a wholesale `LodSendQueue` adoption would **regress**
+every block edit into a full-column resend. Keep unified's `broadcastLODData(LevelChunk, IntSet
+onlySectionYs)` partial-section path and its `isAllZero` block-light skip; the fork has neither.
+
 Consequences to carry into the plan: `LODDataPayload` becomes the fork's shape (`plainLength` +
 deflated `byte[] body`, `StreamCodec<FriendlyByteBuf, ...>`), which is also the only shape that is
 unit-testable — unified's `RegistryFriendlyByteBuf` codec cannot be constructed without
