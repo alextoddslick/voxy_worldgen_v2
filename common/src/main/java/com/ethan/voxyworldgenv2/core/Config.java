@@ -3,7 +3,7 @@ package com.ethan.voxyworldgenv2.core;
 import com.ethan.voxyworldgenv2.VoxyWorldGenV2;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import net.fabricmc.loader.api.FabricLoader;
+import com.ethan.voxyworldgenv2.platform.Services;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -11,12 +11,19 @@ import java.nio.file.Path;
 
 public final class Config {
     
+    /**
+     * Resolved lazily and defensively, never as a static final. Services.PLATFORM is a ServiceLoader
+     * lookup that throws when no loader binding is on the classpath, which is exactly the case under
+     * a plain JUnit JVM -- a static initializer would turn every Config test into
+     * ExceptionInInitializerError. Catching Throwable rather than Exception is deliberate: the first
+     * failure surfaces as ExceptionInInitializerError and later ones as NoClassDefFoundError, both
+     * Errors. Going through Services instead of a loader API keeps this class free of any
+     * loader-specific import, which matters because common/ is compiled into both loader modules.
+     */
     private static Path getConfigPath() {
         try {
-            var loader = FabricLoader.getInstance();
-            if (loader != null && loader.getConfigDir() != null) {
-                return loader.getConfigDir().resolve("voxyworldgenv2.json");
-            }
+            Path dir = Services.PLATFORM.getConfigDir();
+            if (dir != null) return dir.resolve("voxyworldgenv2.json");
         } catch (Throwable ignored) {}
         return Path.of("config", "voxyworldgenv2.json");
     }

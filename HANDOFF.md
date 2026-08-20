@@ -55,6 +55,16 @@ compiling for free rather than knowingly breaking it.
 `common/` is touched in exactly two places, both of which must stay 1.21.1-compatible:
 `core/Config.java` (plain Java + Gson) and, in plan 2, `integration/VoxyIntegration.rawIngest`.
 
+**`common/` must stay free of loader-specific imports.** Plan 1 briefly broke this: the merged
+`Config` carried `import net.fabricmc.loader.api.FabricLoader`, which compiles under `:fabric` but
+not `:neoforge`, since both `srcDir` the same directory. `getConfigPath()` now goes through
+`Services.PLATFORM` inside a `try/catch (Throwable)` instead, which is loader-neutral **and** still
+falls back to `Path.of("config", ...)` under a plain JUnit JVM where the ServiceLoader binding is
+absent. Catching `Throwable` rather than `Exception` is deliberate — the first failure surfaces as
+`ExceptionInInitializerError` and later ones as `NoClassDefFoundError`, both `Error`s.
+
+Verify with `grep -rn "net.fabricmc" common/src/main/java/` — it must return nothing.
+
 ## Plan sequence
 
 | # | Plan | Status |
