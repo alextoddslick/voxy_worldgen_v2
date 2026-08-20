@@ -23,5 +23,11 @@
   "voxyworldgenv2.option.hud_client_disk": "Tab HUD: client disk usage",
   "voxyworldgenv2.option.gen_enabled": "Generation enabled",
   "voxyworldgenv2.option.gen_radius": "Generation radius",
-  "voxyworldgenv2.option.max_tasks": "Max active tasks"
+  "voxyworldgenv2.option.max_tasks": "Max active tasks",
+  "voxyworldgenv2.option.hud_compressed.tooltip": "Show post-compression wire traffic in the hold-Tab HUD.",
+  "voxyworldgenv2.option.hud_savings.tooltip": "Show how much the LOD stream saved by compressing.",
+  "voxyworldgenv2.option.hud_client_disk.tooltip": "Show how much disk Voxy's local LOD store is using.",
+  "voxyworldgenv2.option.gen_enabled.tooltip": "Whether the server generates and streams LOD chunks at all.",
+  "voxyworldgenv2.option.gen_radius.tooltip": "How far from each player the server keeps generating, in chunks. Server-wide; operators only.",
+  "voxyworldgenv2.option.max_tasks.tooltip": "How many chunks the server generates at once. Higher fills faster and costs more CPU."
 }

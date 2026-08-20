@@ -32,6 +32,17 @@ public class SodiumIntegration implements ConfigEntryPoint {
      */
     private static final StorageEventHandler SAVE = Config::save;
 
+    /**
+     * Sodium's StatefulOptionBuilderImpl.validateData requires ALL of: name, storage handler,
+     * tooltip provider, default value and binding. Integer options additionally require a value
+     * formatter and a validator (setRange). Any one missing throws, and Sodium swallows what
+     * escapes the entrypoint, so the whole page vanishes without a word. Read from its bytecode
+     * rather than discovered one crash at a time.
+     */
+    private static Component tip(String key) {
+        return Component.translatable(key);
+    }
+
     private static Identifier id(String path) {
         return Identifier.parse("voxyworldgenv2:" + path);
     }
@@ -68,18 +79,21 @@ public class SodiumIntegration implements ConfigEntryPoint {
                 .setStorageHandler(SAVE))
             .addOption(builder.createBooleanOption(id("hud_compressed"))
                 .setName(Component.translatable("voxyworldgenv2.option.hud_compressed"))
+                .setTooltip(tip("voxyworldgenv2.option.hud_compressed.tooltip"))
                 .setBinding(v -> { Config.DATA.hudShowCompressed = v; Config.save(); },
                             () -> Config.DATA.hudShowCompressed)
                 .setDefaultValue(true)
                 .setStorageHandler(SAVE))
             .addOption(builder.createBooleanOption(id("hud_savings"))
                 .setName(Component.translatable("voxyworldgenv2.option.hud_savings"))
+                .setTooltip(tip("voxyworldgenv2.option.hud_savings.tooltip"))
                 .setBinding(v -> { Config.DATA.hudShowSavings = v; Config.save(); },
                             () -> Config.DATA.hudShowSavings)
                 .setDefaultValue(true)
                 .setStorageHandler(SAVE))
             .addOption(builder.createBooleanOption(id("hud_client_disk"))
                 .setName(Component.translatable("voxyworldgenv2.option.hud_client_disk"))
+                .setTooltip(tip("voxyworldgenv2.option.hud_client_disk.tooltip"))
                 .setBinding(v -> { Config.DATA.hudShowClientDisk = v; Config.save(); },
                             () -> Config.DATA.hudShowClientDisk)
                 .setDefaultValue(true)
@@ -93,6 +107,7 @@ public class SodiumIntegration implements ConfigEntryPoint {
             .setName(Component.translatable("config.voxyworldgenv2.category.server"))
             .addOption(builder.createBooleanOption(id("gen_enabled"))
                 .setName(Component.translatable("voxyworldgenv2.option.gen_enabled"))
+                .setTooltip(tip("voxyworldgenv2.option.gen_enabled.tooltip"))
                 .setBinding(v -> push(s -> new Config.ServerConfig(
                         v, s.generationRadius(), s.updateInterval(), s.maxQueueSize(), s.maxActiveTasks())),
                     () -> ServerConfigGate.current().enabled())
@@ -104,6 +119,8 @@ public class SodiumIntegration implements ConfigEntryPoint {
             .addOption(builder.createIntegerOption(id("gen_radius"))
                 .setRange(1, 512, 1)
                 .setName(Component.translatable("voxyworldgenv2.option.gen_radius"))
+                .setTooltip(tip("voxyworldgenv2.option.gen_radius.tooltip"))
+                .setValueFormatter(v -> Component.literal(v + " chunks"))
                 .setBinding(v -> push(s -> new Config.ServerConfig(
                         s.enabled(), v, s.updateInterval(), s.maxQueueSize(), s.maxActiveTasks())),
                     () -> ServerConfigGate.current().generationRadius())
@@ -113,6 +130,8 @@ public class SodiumIntegration implements ConfigEntryPoint {
             .addOption(builder.createIntegerOption(id("max_tasks"))
                 .setRange(1, 128, 1)
                 .setName(Component.translatable("voxyworldgenv2.option.max_tasks"))
+                .setTooltip(tip("voxyworldgenv2.option.max_tasks.tooltip"))
+                .setValueFormatter(v -> Component.literal(String.valueOf(v)))
                 .setBinding(v -> push(s -> new Config.ServerConfig(
                         s.enabled(), s.generationRadius(), s.updateInterval(), s.maxQueueSize(), v)),
                     () -> ServerConfigGate.current().maxActiveTasks())
@@ -127,6 +146,7 @@ public class SodiumIntegration implements ConfigEntryPoint {
 
         builder.registerOwnModOptions()
             .setName("Voxy World Gen V2")
+            .setVersion("2.5.0") // ModOptionsBuilderImpl validates this is non-null
             .addPage(page);
         com.ethan.voxyworldgenv2.VoxyWorldGenV2.LOGGER.info(
             "[voxy-settings] Sodium page registered successfully");
