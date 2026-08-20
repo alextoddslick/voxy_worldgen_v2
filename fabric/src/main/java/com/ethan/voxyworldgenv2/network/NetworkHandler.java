@@ -34,6 +34,9 @@ public class NetworkHandler {
     public static final Identifier SERVER_CONFIG_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":server_config");
     public static final Identifier SERVER_CONFIG_PUSH_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":server_config_push");
     public static final Identifier KNOWN_CHUNKS_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":known_chunks");
+    public static final Identifier STORAGE_REPORT_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":storage_report");
+    public static final Identifier SETTINGS_SNAPSHOT_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":settings_snapshot");
+    public static final Identifier SETTINGS_UPDATE_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":settings_update");
 
     /**
      * The merged Fabric wire format: unified's config push plus the fork's compressed LOD, known
@@ -371,6 +374,166 @@ public class NetworkHandler {
         }
     }
 
+    public record StorageReportPayload(long bytesOnDisk) implements CustomPacketPayload {
+        public static final Type<StorageReportPayload> TYPE = new Type<>(STORAGE_REPORT_ID);
+        public static final StreamCodec<FriendlyByteBuf, StorageReportPayload> CODEC =
+            CustomPacketPayload.codec(StorageReportPayload::write, StorageReportPayload::new);
+
+        public StorageReportPayload(FriendlyByteBuf buf) {
+            this(buf.readLong());
+        }
+
+        public void write(FriendlyByteBuf buf) {
+            buf.writeLong(bytesOnDisk);
+        }
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+    /**
+     * Everything the settings screen renders, in one S2C payload: the editable values (already
+     * resolved to the profile the commands would edit), the HUD toggles, a live-stats strip, and —
+     * for ops only — the player table. Sent on /voxygen settings and again after every applied
+     * update, so the screen never has to guess at server state.
+     */
+    public record SettingsSnapshotPayload(
+        boolean isOp, boolean singleplayerActive,
+        boolean enabled, int generationRadius, int maxActiveTasks, int maxChunksPerSecond,
+        double maxMbpsPerPlayer, int lodSendDistanceChunks,
+        boolean hudCompressed, boolean hudSavings, boolean hudClientDisk,
+        long wireBytesSent, long wireBps, int zipRatioX10,
+        int queued, int maxQueued, long chunksDone,
+        List<PlayerRow> players
+    ) implements CustomPacketPayload {
+        public static final Type<SettingsSnapshotPayload> TYPE = new Type<>(SETTINGS_SNAPSHOT_ID);
+        public static final StreamCodec<FriendlyByteBuf, SettingsSnapshotPayload> CODEC =
+            CustomPacketPayload.codec(SettingsSnapshotPayload::write, SettingsSnapshotPayload::new);
+
+        /** One admin-table row. diskBytes -1 = never reported; hasCap/hasDist mark overrides. */
+        public record PlayerRow(java.util.UUID uuid, String name, boolean online, long lastSeenMs,
+                                long wireBytes, long diskBytes,
+                                boolean hasCap, double capMbps,
+                                boolean hasDist, int distChunks) {
+            void write(FriendlyByteBuf buf) {
+                buf.writeUUID(uuid);
+                buf.writeUtf(name, 64);
+                buf.writeBoolean(online);
+                buf.writeLong(lastSeenMs);
+                buf.writeLong(wireBytes);
+                buf.writeLong(diskBytes);
+                buf.writeBoolean(hasCap);
+                buf.writeDouble(capMbps);
+                buf.writeBoolean(hasDist);
+                buf.writeVarInt(distChunks);
+            }
+
+            static PlayerRow read(FriendlyByteBuf buf) {
+                return new PlayerRow(buf.readUUID(), buf.readUtf(64), buf.readBoolean(),
+                    buf.readLong(), buf.readLong(), buf.readLong(),
+                    buf.readBoolean(), buf.readDouble(), buf.readBoolean(), buf.readVarInt());
+            }
+        }
+
+        public SettingsSnapshotPayload(FriendlyByteBuf buf) {
+            this(buf.readBoolean(), buf.readBoolean(),
+                buf.readBoolean(), buf.readVarInt(), buf.readVarInt(), buf.readVarInt(),
+                buf.readDouble(), buf.readVarInt(),
+                buf.readBoolean(), buf.readBoolean(), buf.readBoolean(),
+                buf.readLong(), buf.readLong(), buf.readVarInt(),
+                buf.readVarInt(), buf.readVarInt(), buf.readLong(),
+                buf.readCollection(ArrayList::new, PlayerRow::read));
+        }
+
+        public void write(FriendlyByteBuf buf) {
+            buf.writeBoolean(isOp);
+            buf.writeBoolean(singleplayerActive);
+            buf.writeBoolean(enabled);
+            buf.writeVarInt(generationRadius);
+            buf.writeVarInt(maxActiveTasks);
+            buf.writeVarInt(maxChunksPerSecond);
+            buf.writeDouble(maxMbpsPerPlayer);
+            buf.writeVarInt(lodSendDistanceChunks);
+            buf.writeBoolean(hudCompressed);
+            buf.writeBoolean(hudSavings);
+            buf.writeBoolean(hudClientDisk);
+            buf.writeLong(wireBytesSent);
+            buf.writeLong(wireBps);
+            buf.writeVarInt(zipRatioX10);
+            buf.writeVarInt(queued);
+            buf.writeVarInt(maxQueued);
+            buf.writeLong(chunksDone);
+            buf.writeCollection(players, (b, r) -> r.write((FriendlyByteBuf) b));
+        }
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
+    /**
+     * The screen's edits going back: string-keyed ops that {@code SettingsApplier} gives the same
+     * semantics and clamps as the /voxygen commands. Bounded hard at read time — the op check
+     * happens later, so the codec itself must not let an unauthenticated packet allocate freely.
+     */
+    public record SettingsUpdatePayload(List<Op> ops) implements CustomPacketPayload {
+        public static final Type<SettingsUpdatePayload> TYPE = new Type<>(SETTINGS_UPDATE_ID);
+        public static final StreamCodec<FriendlyByteBuf, SettingsUpdatePayload> CODEC =
+            CustomPacketPayload.codec(SettingsUpdatePayload::write, SettingsUpdatePayload::new);
+
+        public static final int MAX_OPS = 64;
+
+        public record Op(String key, String value) {
+            void write(FriendlyByteBuf buf) {
+                buf.writeUtf(key, 96);
+                buf.writeUtf(value, 64);
+            }
+
+            static Op read(FriendlyByteBuf buf) {
+                return new Op(buf.readUtf(96), buf.readUtf(64));
+            }
+        }
+
+        public SettingsUpdatePayload(FriendlyByteBuf buf) {
+            this(readOps(buf));
+        }
+
+        private static List<Op> readOps(FriendlyByteBuf buf) {
+            int count = buf.readVarInt();
+            if (count < 0 || count > MAX_OPS) {
+                throw new io.netty.handler.codec.DecoderException("settings update too large: " + count);
+            }
+            List<Op> ops = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) ops.add(Op.read(buf));
+            return ops;
+        }
+
+        public void write(FriendlyByteBuf buf) {
+            buf.writeVarInt(ops.size());
+            for (Op op : ops) op.write(buf);
+        }
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
+    /** Whether a chunk is inside the player's configured LOD send distance; 0 = unlimited. */
+    public static boolean withinSendDistance(double dxBlocks, double dzBlocks, int sendDistanceChunks) {
+        if (sendDistanceChunks <= 0) return true;
+        double maxDist = sendDistanceChunks * 16.0;
+        return dxBlocks * dxBlocks + dzBlocks * dzBlocks <= maxDist * maxDist;
+    }
+
+    /** Catch-up never reaches past the send distance; 0 = unlimited. */
+    public static int capCatchUpRadius(int desiredRadius, int sendDistanceChunks) {
+        if (sendDistanceChunks <= 0) return desiredRadius;
+        return Math.min(desiredRadius, sendDistanceChunks);
+    }
+
     // one sync radius shared by the broadcast, catch-up and chunk-load paths. Derived from the
     // configured generationRadius rather than a fixed constant, so tuning the radius moves the
     // set of players who receive a chunk with it.
@@ -406,6 +569,9 @@ public class NetworkHandler {
         PayloadTypeRegistry.serverboundPlay().register(HandshakeAckPayload.TYPE, HandshakeAckPayload.CODEC);
         PayloadTypeRegistry.serverboundPlay().register(ServerConfigPushPayload.TYPE, ServerConfigPushPayload.CODEC);
         PayloadTypeRegistry.serverboundPlay().register(KnownChunksPayload.TYPE, KnownChunksPayload.CODEC);
+        PayloadTypeRegistry.serverboundPlay().register(StorageReportPayload.TYPE, StorageReportPayload.CODEC);
+        PayloadTypeRegistry.serverboundPlay().register(SettingsUpdatePayload.TYPE, SettingsUpdatePayload.CODEC);
+        PayloadTypeRegistry.clientboundPlay().register(SettingsSnapshotPayload.TYPE, SettingsSnapshotPayload.CODEC);
 
         ServerPlayNetworking.registerGlobalReceiver(KnownChunksPayload.TYPE,
             (payload, context) -> context.server().execute(() -> receiveKnownChunks(context.player(), payload)));
