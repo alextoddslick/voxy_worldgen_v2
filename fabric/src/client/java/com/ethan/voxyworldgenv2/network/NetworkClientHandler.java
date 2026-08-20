@@ -33,15 +33,17 @@ public class NetworkClientHandler {
         ClientPlayNetworking.registerGlobalReceiver(NetworkHandler.HandshakePayload.TYPE, (payload, context) -> {
             boolean serverHasMod = payload.serverHasMod();
             context.client().execute(() -> {
-                // only connected if the server matches our protocol
-                boolean compatible = serverHasMod
-                        && payload.protocolVersion() == NetworkHandler.PROTOCOL_VERSION;
-                if (serverHasMod && !compatible) {
-                    VoxyWorldGenV2.LOGGER.warn("server voxy protocol {} != ours {}, LOD sync disabled",
+                // Record the server's protocol instead of demanding equality. Every serverbound
+                // feature is gated on a floor (supportsKnownChunks, supportsStorageReport), because
+                // sending a payload the peer never registered DROPS the connection. Order matters:
+                // setServerConnected(false) zeroes the protocol, so connect first, then record.
+                NetworkState.setServerConnected(serverHasMod);
+                NetworkState.setServerProtocol(serverHasMod ? payload.protocolVersion() : 0);
+                if (serverHasMod && payload.protocolVersion() != NetworkHandler.PROTOCOL_VERSION) {
+                    VoxyWorldGenV2.LOGGER.info("server voxy protocol {} != ours {}, using the common subset",
                             payload.protocolVersion(), NetworkHandler.PROTOCOL_VERSION);
                 }
-                NetworkState.setServerConnected(compatible);
-                ClientPlayNetworking.send(new NetworkHandler.HandshakeAckPayload(true, NetworkHandler.PROTOCOL_VERSION));
+                ClientPlayNetworking.send(new NetworkHandler.HandshakeAckPayload(NetworkHandler.PROTOCOL_VERSION));
             });
         });
 

@@ -45,8 +45,8 @@ public class ChunkUpdateTracker {
     // mark the section containing blockY dirty for this chunk
     public void markDirty(LevelChunk chunk, int blockY) {
         // this fires for every block change (fluids, fire, redstone), so bail before
-        // any map work when nobody can receive a resend
-        if (!PlayerTracker.getInstance().anyModded()) return;
+        // any map work when nobody is online to receive a resend
+        if (PlayerTracker.getInstance().getPlayerCount() == 0) return;
 
         long key = Services.CHUNK_POS.packPos(chunk.getPos());
         Map<Long, IntSet> levelDirty = dirty.computeIfAbsent(chunk.getLevel().dimension(), k -> new ConcurrentHashMap<>());

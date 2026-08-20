@@ -74,18 +74,17 @@ public class NetworkHandler {
         }
     }
 
-    // client -> server ack so the server knows this client can receive lod data
-    public record HandshakeAckPayload(boolean clientHasMod, int protocolVersion) implements CustomPacketPayload {
+    // client -> server ack carrying the client's protocol, so the server can gate features on a floor
+    public record HandshakeAckPayload(int clientProtocol) implements CustomPacketPayload {
         public static final Type<HandshakeAckPayload> TYPE = new Type<>(HANDSHAKE_ACK_ID);
         public static final StreamCodec<FriendlyByteBuf, HandshakeAckPayload> CODEC = CustomPacketPayload.codec(HandshakeAckPayload::write, HandshakeAckPayload::new);
 
         public HandshakeAckPayload(FriendlyByteBuf buf) {
-            this(buf.readBoolean(), buf.readVarInt());
+            this(buf.readVarInt());
         }
 
         public void write(FriendlyByteBuf buf) {
-            buf.writeBoolean(this.clientHasMod);
-            buf.writeVarInt(this.protocolVersion);
+            buf.writeVarInt(this.clientProtocol);
         }
 
         @Override
@@ -235,17 +234,17 @@ public class NetworkHandler {
         ServerPlayNetworking.registerGlobalReceiver(HandshakeAckPayload.TYPE, (payload, context) -> {
             ServerPlayer player = context.player();
             context.server().execute(() -> {
-                // only modded if it acks and matches our protocol, else packets would
-                // mis-parse so leave it unmodded and send nothing
-                boolean compatible = payload.clientHasMod()
-                        && payload.protocolVersion() == PROTOCOL_VERSION;
-                if (payload.clientHasMod() && !compatible) {
-                    VoxyWorldGenV2.LOGGER.warn("client {} has an incompatible voxy protocol (theirs={}, ours={}), not syncing LOD data",
-                            player.getName().getString(), payload.protocolVersion(), PROTOCOL_VERSION);
+                // Record rather than compare. A mismatch is not a reason to send nothing: features
+                // are gated on floors, so an older client keeps receiving terrain and is simply not
+                // offered payloads its build cannot parse. setClientProtocol must run before
+                // sendServerConfig, which is gated on the recorded value.
+                PlayerTracker.getInstance().setClientProtocol(player.getUUID(), payload.clientProtocol());
+                if (payload.clientProtocol() != PROTOCOL_VERSION) {
+                    VoxyWorldGenV2.LOGGER.info("client {} speaks voxy protocol {} (ours={}), serving what it supports",
+                            player.getName().getString(), payload.clientProtocol(), PROTOCOL_VERSION);
                 }
-                PlayerTracker.getInstance().setModded(player.getUUID(), compatible);
                 sendServerConfig(player);
-                if (compatible) com.ethan.voxyworldgenv2.core.ChunkGenerationManager.getInstance().onPlayerModded();
+                com.ethan.voxyworldgenv2.core.ChunkGenerationManager.getInstance().onPlayerModded();
             });
         });
 
@@ -270,7 +269,6 @@ public class NetworkHandler {
 
     // send the live server config to one player (canEdit reflects their op status)
     public static void sendServerConfig(ServerPlayer player) {
-        if (!PlayerTracker.getInstance().isModded(player.getUUID())) return;
         boolean canEdit = canEditConfig(player);
         ServerPlayNetworking.send(player, new ServerConfigPayload(Config.ServerConfig.snapshot(), canEdit));
     }
@@ -332,7 +330,6 @@ public class NetworkHandler {
 
         List<ServerPlayer> recipients = new ArrayList<>();
         for (ServerPlayer player : PlayerTracker.getInstance().getPlayers()) {
-            if (!PlayerTracker.getInstance().isModded(player.getUUID())) continue;
             if (!inSyncRange(player, chunk)) {
                 if (onlySectionYs == null) setSyncedState(player, pos, false);
                 continue;
@@ -360,7 +357,6 @@ public class NetworkHandler {
         int minY = chunk.getMinSectionY();
         ResourceKey<Level> dim = chunk.getLevel().dimension();
 
-        if (!PlayerTracker.getInstance().isModded(player.getUUID())) return;
         if (!inSyncRange(player, chunk)) {
             setSyncedState(player, pos, false);
             return;

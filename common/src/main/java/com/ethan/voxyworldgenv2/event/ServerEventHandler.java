@@ -43,13 +43,12 @@ public final class ServerEventHandler {
     }
 
     public static void onChunkLoad(ServerLevel level, LevelChunk chunk) {
-        // fires for every vanilla chunk load, so skip the loop when nobody can receive
-        if (!PlayerTracker.getInstance().anyModded()) return;
+        // fires for every vanilla chunk load, so skip the loop when nobody is online
+        if (PlayerTracker.getInstance().getPlayerCount() == 0) return;
 
-        // offer it to each player, skip non-modded and ones who already have it
+        // offer it to each player, skipping ones who already have it
         long packed = Services.CHUNK_POS.packPos(chunk.getPos());
         for (ServerPlayer player : PlayerTracker.getInstance().getPlayers()) {
-            if (!PlayerTracker.getInstance().isModded(player.getUUID())) continue;
             if (PlayerTracker.getInstance().isSynced(player.getUUID(), packed)) continue;
             Services.NETWORK.sendLODData(player, chunk);
         }

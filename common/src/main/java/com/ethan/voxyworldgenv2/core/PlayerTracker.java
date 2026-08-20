@@ -21,6 +21,7 @@ public class PlayerTracker {
     private final java.util.Map<UUID, LongSet> syncedChunks;
     // players that acked the handshake, we only send lod data to these
     private final Set<UUID> moddedPlayers;
+    private final java.util.Map<UUID, Integer> clientProtocols = new java.util.concurrent.ConcurrentHashMap<>();
     // recently joined players that still need a backfill
     private final Set<UUID> needsBackfill;
     // last dimension per player, to spot a dim change
@@ -88,6 +89,20 @@ public class PlayerTracker {
         return players.size();
     }
 
+    /**
+     * The peer's announced protocol, recorded from the handshake ack. Gating clientbound payloads
+     * on a floor here is what lets an older client keep receiving terrain while simply not being
+     * offered features its build cannot parse.
+     */
+    public void setClientProtocol(UUID uuid, int protocol) {
+        clientProtocols.put(uuid, protocol);
+    }
+
+    public int getClientProtocol(UUID uuid) {
+        return clientProtocols.getOrDefault(uuid, 0);
+    }
+
+    // Retained because the NeoForge module still gates on it; the Fabric module no longer does.
     public void setModded(UUID uuid, boolean modded) {
         if (modded) {
             moddedPlayers.add(uuid);

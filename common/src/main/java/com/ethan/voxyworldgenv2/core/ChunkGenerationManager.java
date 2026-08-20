@@ -262,7 +262,6 @@ public final class ChunkGenerationManager {
 
         for (ServerPlayer player : order) {
             UUID uuid = player.getUUID();
-            if (!PlayerTracker.getInstance().isModded(uuid)) continue;
             var synced = PlayerTracker.getInstance().getSyncedChunks(uuid);
             if (synced == null) continue;
 
@@ -753,13 +752,13 @@ public final class ChunkGenerationManager {
         return state != null && state.completedChunks.contains(Services.CHUNK_POS.packPos(pos));
     }
 
-    // online players that have the client mod, the only ones we generate around
+    /**
+     * Every tracked player. Generation is no longer gated on the client having the mod: the join
+     * gate decides who LOD data is withheld from and for how long, and it expires open, so a
+     * vanilla client is served exactly as it was before the feature existed.
+     */
     private List<ServerPlayer> moddedPlayers() {
-        List<ServerPlayer> out = new ArrayList<>();
-        for (ServerPlayer p : PlayerTracker.getInstance().getPlayers()) {
-            if (PlayerTracker.getInstance().isModded(p.getUUID())) out.add(p);
-        }
-        return out;
+        return new ArrayList<>(PlayerTracker.getInstance().getPlayers());
     }
 
     // returns a new list rotated so element at offset comes first (fair iteration)
