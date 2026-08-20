@@ -3,6 +3,7 @@ package com.ethan.voxyworldgenv2.integration;
 import com.ethan.voxyworldgenv2.core.Config;
 import com.ethan.voxyworldgenv2.network.ServerConfigGate;
 import net.caffeinemc.mods.sodium.api.config.ConfigEntryPoint;
+import net.caffeinemc.mods.sodium.api.config.StorageEventHandler;
 import net.caffeinemc.mods.sodium.api.config.structure.ConfigBuilder;
 import net.caffeinemc.mods.sodium.api.config.structure.OptionGroupBuilder;
 import net.caffeinemc.mods.sodium.api.config.structure.OptionPageBuilder;
@@ -22,6 +23,14 @@ import net.minecraft.resources.Identifier;
  * when Sodium is present. Nothing here is referenced from common code.
  */
 public class SodiumIntegration implements ConfigEntryPoint {
+
+    /**
+     * Sodium validates that every stateful option has one and throws
+     * "Storage handler must be set" from the builder otherwise -- and it swallows what escapes the
+     * entrypoint, so the whole page silently fails to exist. Our bindings already persist on write;
+     * this runs after Sodium applies a batch.
+     */
+    private static final StorageEventHandler SAVE = Config::save;
 
     private static Identifier id(String path) {
         return Identifier.parse("voxyworldgenv2:" + path);
@@ -55,22 +64,26 @@ public class SodiumIntegration implements ConfigEntryPoint {
                 .setTooltip(Component.translatable("config.voxyworldgenv2.option.f3_stats.tooltip"))
                 .setBinding(v -> { Config.DATA.showF3MenuStats = v; Config.save(); },
                             () -> Config.DATA.showF3MenuStats)
-                .setDefaultValue(true))
+                .setDefaultValue(true)
+                .setStorageHandler(SAVE))
             .addOption(builder.createBooleanOption(id("hud_compressed"))
                 .setName(Component.translatable("voxyworldgenv2.option.hud_compressed"))
                 .setBinding(v -> { Config.DATA.hudShowCompressed = v; Config.save(); },
                             () -> Config.DATA.hudShowCompressed)
-                .setDefaultValue(true))
+                .setDefaultValue(true)
+                .setStorageHandler(SAVE))
             .addOption(builder.createBooleanOption(id("hud_savings"))
                 .setName(Component.translatable("voxyworldgenv2.option.hud_savings"))
                 .setBinding(v -> { Config.DATA.hudShowSavings = v; Config.save(); },
                             () -> Config.DATA.hudShowSavings)
-                .setDefaultValue(true))
+                .setDefaultValue(true)
+                .setStorageHandler(SAVE))
             .addOption(builder.createBooleanOption(id("hud_client_disk"))
                 .setName(Component.translatable("voxyworldgenv2.option.hud_client_disk"))
                 .setBinding(v -> { Config.DATA.hudShowClientDisk = v; Config.save(); },
                             () -> Config.DATA.hudShowClientDisk)
-                .setDefaultValue(true));
+                .setDefaultValue(true)
+                .setStorageHandler(SAVE));
 
         // Server values. Disabled rather than hidden for a non-operator: a greyed row says "not
         // yours to change", where a missing row reads as the setting having disappeared.
@@ -84,6 +97,7 @@ public class SodiumIntegration implements ConfigEntryPoint {
                         v, s.generationRadius(), s.updateInterval(), s.maxQueueSize(), s.maxActiveTasks())),
                     () -> ServerConfigGate.current().enabled())
                 .setDefaultValue(true)
+                .setStorageHandler(SAVE)
                 .setEnabled(editable))
             // Ranges match Config.applyServerConfig's clamps exactly; a slider offering a value the
             // server then clamps looks like the setting silently reverted.
@@ -94,6 +108,7 @@ public class SodiumIntegration implements ConfigEntryPoint {
                         s.enabled(), v, s.updateInterval(), s.maxQueueSize(), s.maxActiveTasks())),
                     () -> ServerConfigGate.current().generationRadius())
                 .setDefaultValue(64)
+                .setStorageHandler(SAVE)
                 .setEnabled(editable))
             .addOption(builder.createIntegerOption(id("max_tasks"))
                 .setRange(1, 128, 1)
@@ -102,6 +117,7 @@ public class SodiumIntegration implements ConfigEntryPoint {
                         s.enabled(), s.generationRadius(), s.updateInterval(), s.maxQueueSize(), v)),
                     () -> ServerConfigGate.current().maxActiveTasks())
                 .setDefaultValue(20)
+                .setStorageHandler(SAVE)
                 .setEnabled(editable));
 
         OptionPageBuilder page = builder.createOptionPage()

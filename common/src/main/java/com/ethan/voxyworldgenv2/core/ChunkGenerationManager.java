@@ -92,6 +92,10 @@ public final class ChunkGenerationManager {
     private static final long CATCHUP_INTERVAL_MS = 400;
     // chunks resent per catchup pass per player, kept small to avoid tick spikes
     private static final int CATCHUP_BATCH = 8;
+    // Catch-up force-loads chunks off disk every worker iteration. Without a ceiling on outstanding
+    // loads it force-loads faster than the chunk system retires them and the heap is gone in seconds.
+    private static final int MAX_CATCHUP_LOADS_IN_FLIGHT = 128;
+    private final AtomicInteger catchUpLoadsInFlight = new AtomicInteger(0);
     private long lastCatchupMs = 0;
 
     // queued and applied on the main thread so we don't fight c2me
@@ -143,6 +147,7 @@ public final class ChunkGenerationManager {
         this.pauseCheck = () -> false;
         Config.load();
         this.throttle = new Semaphore(Config.DATA.maxActiveTasks);
+        catchUpLoadsInFlight.set(0);
         startWorker();
         VoxyWorldGenV2.LOGGER.info("voxy world gen initialized");
     }
@@ -282,6 +287,20 @@ public final class ChunkGenerationManager {
     }
 
     // resend completed in-range chunks each player is missing, nearest first, joiners first
+    /**
+     * Sends already-generated chunks a player has not received yet.
+     *
+     * <p>Force-loads chunks that are not resident rather than skipping them. On a world built by
+     * earlier play -- which is the whole point of spawn pre-generation -- the chunks are on disk,
+     * not in memory, so getChunkNow misses nearly all of them. Merely deferring those to
+     * onChunkLoad delivers them only once the player physically walks in, which leaves LODs
+     * visible at the far generation frontier and a hole in the near and middle rings: exactly the
+     * band this path exists to fill.
+     *
+     * <p>Outstanding loads are capped. This runs every worker iteration, and without a ceiling it
+     * force-loads faster than the chunk system retires them and the heap is gone in seconds -- the
+     * generator has maxActiveTasks for the same reason, and this path needs its own.
+     */
     private void runCatchup(List<ServerPlayer> players) {
         List<ServerPlayer> order = new ArrayList<>(players.size());
         for (ServerPlayer p : players) if (PlayerTracker.getInstance().needsBackfill(p.getUUID())) order.add(p);
@@ -293,48 +312,93 @@ public final class ChunkGenerationManager {
             if (synced == null) continue;
 
             DimensionState ds = getOrSetupState((ServerLevel) player.level());
+            String dimId = PlayerTracker.dimensionId(player.level().dimension());
+
+            // A /voxygen refresh can ask for a wider sweep than generationRadius. Widening the
+            // catch-up radius is what re-sends those chunks without a second send path.
+            int refreshOverride = PlayerTracker.getInstance().getRefreshRadius(uuid, dimId);
+            int radius = Math.max(radiusFor(ds), refreshOverride);
+
+            // Never claim more than the outstanding-load ceiling allows: the batch is pre-marked
+            // synced below, so anything claimed and then dropped for lack of budget would be lost.
+            int loadBudget = MAX_CATCHUP_LOADS_IN_FLIGHT - catchUpLoadsInFlight.get();
+            if (loadBudget <= 0) return;
+
             List<ChunkPos> syncBatch = new ArrayList<>();
-            // small slice per pass, each chunk serializes on the main thread so a big
-            // batch is a tick spike. backfill continues over the next passes anyway
-            ds.distanceGraph.collectCompletedInRange(player.chunkPosition(), radiusFor(ds), synced, syncBatch, CATCHUP_BATCH);
+            ds.distanceGraph.collectCompletedInRange(
+                player.chunkPosition(), radius, synced, syncBatch, Math.min(CATCHUP_BATCH, loadBudget));
+
             if (syncBatch.isEmpty()) {
+                if (refreshOverride > 0) PlayerTracker.getInstance().clearRefreshRadius(uuid, dimId);
                 PlayerTracker.getInstance().clearBackfill(uuid);
                 continue;
             }
 
-            // mark synced now so the next pass skips these, the send below unmarks any
-            // it couldn't send so an unloaded chunk retries instead of leaving a hole
+            // Mark as claimed now so the next pass does not retry them in a tight loop. Anything
+            // that fails to load is recorded as deferred below, which is what makes this mark mean
+            // "claimed" rather than "delivered" and lets onChunkLoad still send it.
             for (ChunkPos pos : syncBatch) synced.add(Services.CHUNK_POS.packPos(pos));
 
-            final List<ChunkPos> finalBatch = syncBatch;
+            final List<ChunkPos> finalBatch = new ArrayList<>(syncBatch);
             final ServerLevel level = ds.level;
-            // The synced set is keyed by dimension, so the lambda must resolve it against the
-            // dimension the batch was built for, not wherever the player happens to be on arrival.
             final var dimKey = level.dimension();
             server.execute(() -> {
                 ServerPlayer p = server.getPlayerList().getPlayer(uuid);
                 if (p == null) {
-                    // player gone, drop the marks so a rejoin re-syncs
                     var s = PlayerTracker.getInstance().getSyncedChunks(uuid, dimKey);
                     if (s != null) for (ChunkPos pos : finalBatch) s.remove(Services.CHUNK_POS.packPos(pos));
                     return;
                 }
-                var s = PlayerTracker.getInstance().getSyncedChunks(uuid, dimKey);
+
+                var store = PlayerTracker.getInstance().getStore(uuid);
+                ServerChunkCache cache = level.getChunkSource();
+                List<ChunkPos> notResident = new ArrayList<>();
+
                 for (ChunkPos pos : finalBatch) {
-                    // getChunkNow, not getChunk(x, z, false): the false only skips adding a ticket,
-                    // the call still managedBlocks on the chunk's FULL future, and under a parallel
-                    // chunk system a holder can sit at FULL ticket level with a future nothing will
-                    // ever drive. The main thread then parks until the 60s watchdog kills the server.
-                    LevelChunk c = level.getChunkSource().getChunkNow(Services.CHUNK_POS.x(pos), Services.CHUNK_POS.z(pos));
+                    // getChunkNow only: getChunk(x, z, false) still managedBlocks on the chunk's
+                    // FULL future -- the false merely skips adding a ticket -- and under a parallel
+                    // chunk system a holder can sit at FULL with a future nothing will ever drive,
+                    // parking the main thread until the 60s watchdog kills the server.
+                    LevelChunk c = cache.getChunkNow(Services.CHUNK_POS.x(pos), Services.CHUNK_POS.z(pos));
                     if (c != null) {
-                        // sendLODData rechecks range and sets the synced flag
                         Services.NETWORK.sendLODData(p, c);
-                    } else if (s != null) {
-                        // not loaded, clear the mark so we try again later
-                        s.remove(Services.CHUNK_POS.packPos(pos));
+                    } else {
+                        notResident.add(pos);
                     }
                 }
+
+                if (notResident.isEmpty()) return;
+
+                // Pull the rest in off-thread the same way the generator does: FORCED ticket, then
+                // the main-thread chunk future. Bounded by the per-batch cap and the ceiling above.
+                catchUpLoadsInFlight.addAndGet(notResident.size());
+                for (ChunkPos pos : notResident) queueTicketAdd(level, pos);
+                processPendingTickets();
+
+                for (ChunkPos pos : notResident) {
+                    ((com.ethan.voxyworldgenv2.mixin.ServerChunkCacheMixin) cache)
+                        .invokeGetChunkFutureMainThread(
+                            Services.CHUNK_POS.x(pos), Services.CHUNK_POS.z(pos), ChunkStatus.FULL, true)
+                        .whenCompleteAsync((result, throwable) -> {
+                            ServerPlayer target = server.getPlayerList().getPlayer(uuid);
+                            if (throwable == null && result != null && result.isSuccess()
+                                    && result.orElse(null) instanceof LevelChunk chunk) {
+                                if (target != null && !chunk.isEmpty()) {
+                                    Services.NETWORK.sendLODData(target, chunk);
+                                }
+                            } else if (store != null && Config.DATA.rememberSentChunks) {
+                                // The load failed and the batch was already pre-marked synced, so
+                                // without this the chunk is claimed and never arrives.
+                                store.markDeferred(dimId, Services.CHUNK_POS.packPos(pos));
+                            }
+                            // Release the ticket only. This chunk was never a generation task, so
+                            // the bookkeeping in cleanupTask/onSuccess must not run for it.
+                            queueTicketRemove(level, pos);
+                            catchUpLoadsInFlight.decrementAndGet();
+                        }, server);
+                }
             });
+            return; // one player per call
         }
     }
 
