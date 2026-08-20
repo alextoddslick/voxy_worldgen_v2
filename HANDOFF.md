@@ -19,6 +19,28 @@ plays on has **none** of the fork's features. That is the gap this branch closes
 
 Design: `docs/superpowers/specs/2026-08-19-unified-port-and-spawn-pregen-design.md`
 
+## Deploying a build
+
+**Every build lands in `~/Downloads/` at the top level, automatically.** Alex tests on a Windows
+gaming PC (Voxy runs poorly on the Mac's GL path) and carries jars across by hand, so a build he
+cannot find is a build he cannot test. Print the MD5 with it (`md5 -q <jar>`) — "it didn't work"
+has more than once meant an older jar was still on the PC.
+
+**Never copy a build into the ModrinthApp profile folder.** Stage in `~/Downloads`; he installs
+from there himself.
+
+```bash
+JAVA_HOME=/opt/homebrew/opt/openjdk@25 ./gradlew :fabric:build
+cp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.4.3.jar" ~/Downloads/
+cp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.4.3.jar" ~/Downloads/voxy-server-mods/
+scp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.4.3.jar" xps@192.168.1.23:~/mc/voxy/mods/
+ssh xps@192.168.1.23 '~/mc-ctl stop && ~/mc-ctl start'
+md5 -q ~/Downloads/"Voxy World Gen V2-fabric-26.2-2.4.3.jar"
+```
+
+Client and server must move together — the merged build is protocol 5, and a mismatched peer is
+dropped at the handshake.
+
 ## Build and test
 
 ```bash
