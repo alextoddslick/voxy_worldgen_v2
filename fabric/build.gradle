@@ -36,6 +36,10 @@ dependencies {
         exclude(group: "net.fabricmc.fabric-api")
     }
     implementation "com.terraformersmc:modmenu:${rootProject.mod_menu_version}"
+
+    testImplementation platform("org.junit:junit-bom:5.11.3")
+    testImplementation "org.junit.jupiter:junit-jupiter"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
 }
 
 processResources {
@@ -65,5 +69,28 @@ java {
 jar {
     from("${rootDir}/LICENSE") {
         rename { "${it}_${rootProject.mod_name}" }
+    }
+}
+
+// Loom's splitEnvironmentSourceSets() creates a separate `client` source set. Tests need to see
+// both it and main, otherwise client-only classes (ClientStorageReporter in plan 3) are invisible
+// to their tests even though they share a package.
+sourceSets {
+    test {
+        compileClasspath += sourceSets.main.output + sourceSets.client.output
+        runtimeClasspath += sourceSets.main.output + sourceSets.client.output
+    }
+}
+
+configurations {
+    testImplementation.extendsFrom implementation
+    testRuntimeOnly.extendsFrom runtimeOnly
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events "failed", "skipped"
+        exceptionFormat "full"
     }
 }
