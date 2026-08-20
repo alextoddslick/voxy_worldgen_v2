@@ -40,14 +40,14 @@ public class NetworkClientHandler {
         context.enqueueWork(() -> {
             // only connected if the server matches our protocol
             boolean compatible = serverHasMod
-                    && payload.protocolVersion() == VoxyWorldGenV2.PROTOCOL_VERSION;
+                    && payload.protocolVersion() == NetworkHandler.PROTOCOL_VERSION;
             if (serverHasMod && !compatible) {
                 VoxyWorldGenV2.LOGGER.warn("server voxy protocol {} != ours {}, LOD sync disabled",
-                        payload.protocolVersion(), VoxyWorldGenV2.PROTOCOL_VERSION);
+                        payload.protocolVersion(), NetworkHandler.PROTOCOL_VERSION);
             }
             NetworkState.setServerConnected(compatible);
             // reply so the server knows this client can receive lod data
-            PacketDistributor.sendToServer(new NetworkHandler.HandshakeAckPayload(true, VoxyWorldGenV2.PROTOCOL_VERSION));
+            PacketDistributor.sendToServer(new NetworkHandler.HandshakeAckPayload(true, NetworkHandler.PROTOCOL_VERSION));
         });
     }
 

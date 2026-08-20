@@ -32,6 +32,14 @@ public class NetworkHandler {
     public static final Identifier SERVER_CONFIG_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":server_config");
     public static final Identifier SERVER_CONFIG_PUSH_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":server_config_push");
 
+    /**
+     * The merged Fabric wire format: unified's config push plus the fork's compressed LOD, known
+     * chunks, storage report and settings payloads. It is a superset of neither lineage, so it gets
+     * its own number rather than continuing either sequence. Peers announce this in the handshake
+     * and gate features on floors (>=), never equality.
+     */
+    public static final int PROTOCOL_VERSION = 5;
+
     // keep packets well under netty 2mb limit so servers don't reset the connection
     private static final int MAX_PACKET_BYTES = 32_768;
     private static final int SECTION_OVERHEAD_BYTES = 32;
@@ -46,8 +54,13 @@ public class NetworkHandler {
         public static final Type<HandshakePayload> TYPE = new Type<>(HANDSHAKE_ID);
         public static final StreamCodec<FriendlyByteBuf, HandshakePayload> CODEC = CustomPacketPayload.codec(HandshakePayload::write, HandshakePayload::new);
 
+        /**
+         * Protocol 1 wrote only the boolean. Reading a varint unconditionally throws inside the
+         * netty decoder and drops the connection with an opaque "Internal Exception" before the
+         * player reaches the world, so a missing field must read as version 1.
+         */
         public HandshakePayload(FriendlyByteBuf buf) {
-            this(buf.readBoolean(), buf.readVarInt());
+            this(buf.readBoolean(), buf.isReadable() ? buf.readVarInt() : 1);
         }
 
         public void write(FriendlyByteBuf buf) {
@@ -225,10 +238,10 @@ public class NetworkHandler {
                 // only modded if it acks and matches our protocol, else packets would
                 // mis-parse so leave it unmodded and send nothing
                 boolean compatible = payload.clientHasMod()
-                        && payload.protocolVersion() == VoxyWorldGenV2.PROTOCOL_VERSION;
+                        && payload.protocolVersion() == PROTOCOL_VERSION;
                 if (payload.clientHasMod() && !compatible) {
                     VoxyWorldGenV2.LOGGER.warn("client {} has an incompatible voxy protocol (theirs={}, ours={}), not syncing LOD data",
-                            player.getName().getString(), payload.protocolVersion(), VoxyWorldGenV2.PROTOCOL_VERSION);
+                            player.getName().getString(), payload.protocolVersion(), PROTOCOL_VERSION);
                 }
                 PlayerTracker.getInstance().setModded(player.getUUID(), compatible);
                 sendServerConfig(player);
@@ -469,6 +482,6 @@ public class NetworkHandler {
     }
 
     public static void sendHandshake(ServerPlayer player) {
-        ServerPlayNetworking.send(player, new HandshakePayload(true, VoxyWorldGenV2.PROTOCOL_VERSION));
+        ServerPlayNetworking.send(player, new HandshakePayload(true, PROTOCOL_VERSION));
     }
 }

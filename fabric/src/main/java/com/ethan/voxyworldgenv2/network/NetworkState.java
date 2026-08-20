@@ -4,6 +4,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class NetworkState {
     private static boolean serverConnected = false;
+    private static volatile int serverProtocol = 0;
     private static final AtomicLong chunksReceived = new AtomicLong(0);
     private static final AtomicLong bytesReceived = new AtomicLong(0);
     
@@ -24,11 +25,33 @@ public class NetworkState {
             lastUpdateTime = 0;
             lastChunkCount = 0;
             lastByteCount = 0;
+            serverProtocol = 0;
         }
     }
 
     public static boolean isServerConnected() {
         return serverConnected;
+    }
+
+    public static void setServerProtocol(int version) {
+        serverProtocol = version;
+    }
+
+    public static int getServerProtocol() {
+        return serverProtocol;
+    }
+
+    /**
+     * Feature gates are floors, never equality: a newer server must keep accepting everything an
+     * older one did. An unregistered serverbound payload drops the connection, which is why the
+     * client checks before sending rather than after failing.
+     */
+    public static boolean supportsKnownChunks() {
+        return serverConnected && serverProtocol >= 2;
+    }
+
+    public static boolean supportsStorageReport() {
+        return serverConnected && serverProtocol >= 3;
     }
 
     public static void incrementReceived(long bytes) {

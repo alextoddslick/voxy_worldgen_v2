@@ -26,6 +26,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class NetworkHandler {
+    // NeoForge's wire format is unchanged by the fabric merge and keeps its own number.
+    public static final int PROTOCOL_VERSION = 1;
+
     public static final ResourceLocation HANDSHAKE_ID = ResourceLocation.fromNamespaceAndPath(VoxyWorldGenV2.MOD_ID, "handshake");
     public static final ResourceLocation HANDSHAKE_ACK_ID = ResourceLocation.fromNamespaceAndPath(VoxyWorldGenV2.MOD_ID, "handshake_ack");
     public static final ResourceLocation LOD_DATA_ID = ResourceLocation.fromNamespaceAndPath(VoxyWorldGenV2.MOD_ID, "lod_data");
@@ -243,10 +246,10 @@ public class NetworkHandler {
                 // only modded if it acks and matches our protocol, else packets would
                 // mis-parse so leave it unmodded and send nothing
                 boolean compatible = payload.clientHasMod()
-                        && payload.protocolVersion() == VoxyWorldGenV2.PROTOCOL_VERSION;
+                        && payload.protocolVersion() == PROTOCOL_VERSION;
                 if (payload.clientHasMod() && !compatible) {
                     VoxyWorldGenV2.LOGGER.warn("client {} has an incompatible voxy protocol (theirs={}, ours={}), not syncing LOD data",
-                            player.getGameProfile().getName(), payload.protocolVersion(), VoxyWorldGenV2.PROTOCOL_VERSION);
+                            player.getGameProfile().getName(), payload.protocolVersion(), PROTOCOL_VERSION);
                 }
                 PlayerTracker.getInstance().setModded(player.getUUID(), compatible);
                 sendServerConfig(player);
@@ -493,7 +496,7 @@ public class NetworkHandler {
     }
 
     public static void sendHandshake(ServerPlayer player) {
-        sendTo(player, new HandshakePayload(true, VoxyWorldGenV2.PROTOCOL_VERSION));
+        sendTo(player, new HandshakePayload(true, PROTOCOL_VERSION));
     }
 
     // vanilla and non voxy clients never open our channel, sending anyway throws
