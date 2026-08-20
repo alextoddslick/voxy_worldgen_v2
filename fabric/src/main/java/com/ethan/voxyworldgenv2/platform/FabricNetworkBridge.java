@@ -38,6 +38,11 @@ public final class FabricNetworkBridge implements INetworkBridge {
     }
 
     @Override
+    public void startSendQueue() {
+        NetworkHandler.startSendQueue();
+    }
+
+    @Override
     public void shutdown() {
         NetworkHandler.shutdown();
     }

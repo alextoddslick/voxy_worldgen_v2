@@ -19,5 +19,12 @@ public interface INetworkBridge {
 
     double syncRadiusSq();
 
+    /**
+     * Starts the loader's LOD sender. Called once from onServerStarted. Without it the Fabric send
+     * queue stays stopped and every enqueue is refused, which looks exactly like "no terrain ever
+     * streams" -- silent and total. NeoForge keeps its own pool and no-ops here.
+     */
+    void startSendQueue();
+
     void shutdown();
 }

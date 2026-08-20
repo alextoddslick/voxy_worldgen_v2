@@ -4,6 +4,8 @@ import com.ethan.voxyworldgenv2.VoxyWorldGenV2;
 import com.ethan.voxyworldgenv2.core.Config;
 import com.ethan.voxyworldgenv2.core.PlayerTracker;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
+import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.block.state.BlockState;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.core.SectionPos;
 import net.minecraft.core.registries.Registries;
@@ -41,7 +43,10 @@ public class NetworkHandler {
     public static final int PROTOCOL_VERSION = 5;
 
     // keep packets well under netty 2mb limit so servers don't reset the connection
-    private static final int MAX_PACKET_BYTES = 32_768;
+    // Package-private: LodSendQueue splits batches on it and RegionBitmask derives
+    // MAX_REGIONS_PER_PACKET (180) from this exact value. Change the value and that derivation
+    // silently goes wrong while its tests keep passing.
+    static final int MAX_PACKET_BYTES = 32_768;
     private static final int SECTION_OVERHEAD_BYTES = 32;
     private static final int PACKET_OVERHEAD_BYTES = 256;
 
@@ -380,32 +385,12 @@ public class NetworkHandler {
         }
     }
 
-    // background pool for the safe part of sync serialization stays on the
-    // server thread because the palette write is not safe to read off-thread
-    private static final java.util.concurrent.ExecutorService SEND_POOL = createSendPool();
-
-    // cap the send queue, a storm pushes back on the server thread instead of
-    // growing memory forever
-    private static final int SEND_QUEUE_CAPACITY = 4096;
-
-    private static java.util.concurrent.ExecutorService createSendPool() {
-        int threads = Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
-        java.util.concurrent.ThreadPoolExecutor ex = new java.util.concurrent.ThreadPoolExecutor(
-            threads, threads, 30L, java.util.concurrent.TimeUnit.SECONDS,
-            new java.util.concurrent.LinkedBlockingQueue<>(SEND_QUEUE_CAPACITY),
-            r -> {
-                Thread t = new Thread(r, "Voxy-LOD-Send");
-                t.setDaemon(true);
-                t.setPriority(Thread.NORM_PRIORITY - 1);
-                return t;
-            },
-            new java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy());
-        ex.allowCoreThreadTimeOut(true);
-        return ex;
+    public static void shutdown() {
+        LodSendQueue.getInstance().shutdown();
     }
 
-    public static void shutdown() {
-        SEND_POOL.shutdownNow();
+    public static void startSendQueue() {
+        LodSendQueue.getInstance().start();
     }
 
     public static void broadcastLODData(LevelChunk chunk) {
@@ -429,7 +414,7 @@ public class NetworkHandler {
 
         if (recipients.isEmpty()) return;
 
-        List<LODDataPayload.SectionData> sections = buildSections(chunk, onlySectionYs);
+        List<LodSendQueue.PendingSection> sections = snapshotSections(chunk, onlySectionYs);
         if (sections.isEmpty()) {
             if (onlySectionYs == null) {
                 for (ServerPlayer player : recipients) setSyncedState(player, pos, false);
@@ -452,7 +437,7 @@ public class NetworkHandler {
             return;
         }
 
-        List<LODDataPayload.SectionData> sections = buildSections(chunk, null);
+        List<LodSendQueue.PendingSection> sections = snapshotSections(chunk, null);
         if (sections.isEmpty()) {
             setSyncedState(player, pos, false);
             return;
@@ -461,31 +446,33 @@ public class NetworkHandler {
         sendAsync(dim, pos, minY, sections, List.of(player));
     }
 
-    private static void sendAsync(ResourceKey<Level> dim, ChunkPos pos, int minY, List<LODDataPayload.SectionData> sections, List<ServerPlayer> recipients) {
-        // can race that shutdown drop the send instead of crashing the server tick loop
-        if (SEND_POOL.isShutdown()) return;
-        try {
-            SEND_POOL.execute(() -> {
-                try {
-                    for (ServerPlayer player : recipients) {
-                        // by now the player may have left or moved off, skip stale sends
-                        if (player.hasDisconnected()) continue;
-                        if (!stillRelevant(player, dim, pos)) continue;
-                        sendSectionsInBatches(player, dim, pos, minY, sections);
-                    }
-                } catch (Throwable t) {
-                    VoxyWorldGenV2.LOGGER.error("failed to send LOD data for chunk " + pos, t);
-                }
-            });
-        } catch (java.util.concurrent.RejectedExecutionException ignored) {
-            // pool was shut down between the check above and submit, the chunk should just re-syncs on next join
+    private static void sendAsync(ResourceKey<Level> dim, ChunkPos pos, int minY, List<LodSendQueue.PendingSection> sections, List<ServerPlayer> recipients) {
+        for (ServerPlayer player : recipients) {
+            if (player.hasDisconnected()) continue;
+            if (!stillRelevant(player, dim, pos)) continue;
+            // A refused enqueue means the sender is saturated. Leave the chunk unsynced so the
+            // catch-up path retries it rather than silently losing it.
+            if (!LodSendQueue.getInstance().enqueue(player, dim, pos, minY, sections)) {
+                setSyncedState(player, pos, false);
+            }
         }
     }
 
-    private static List<LODDataPayload.SectionData> buildSections(LevelChunk chunk, it.unimi.dsi.fastutil.ints.IntSet onlySectionYs) {
+
+    // true if every byte is zero, used to drop empty block-light arrays
+    /**
+     * Takes a private copy of each section's state container on the MAIN thread and serialises the
+     * cheap parts (biomes, light) inline. A live PalettedContainer is guarded by a ThreadingDetector
+     * and the main thread may mutate it while the sender reads, so the copy is required, not an
+     * optimisation. The expensive palette encode then happens on the send thread.
+     *
+     * <p>Keeps both of unified's refinements over the fork's version: the onlySectionYs filter, so a
+     * block edit resends one section rather than the whole column, and the all-zero block-light skip.
+     */
+    private static List<LodSendQueue.PendingSection> snapshotSections(LevelChunk chunk, it.unimi.dsi.fastutil.ints.IntSet onlySectionYs) {
         ChunkPos pos = chunk.getPos();
         int minY = chunk.getMinSectionY();
-        List<LODDataPayload.SectionData> sections = new ArrayList<>();
+        List<LodSendQueue.PendingSection> out = new ArrayList<>();
         var lightEngine = chunk.getLevel().getLightEngine();
 
         LevelChunkSection[] sectionArray = chunk.getSections();
@@ -496,18 +483,15 @@ public class NetworkHandler {
             LevelChunkSection section = sectionArray[i];
             if (section == null || section.hasOnlyAir()) continue;
 
-            io.netty.buffer.ByteBuf statesRaw = io.netty.buffer.Unpooled.buffer();
             io.netty.buffer.ByteBuf biomesRaw = io.netty.buffer.Unpooled.buffer();
             try {
-                byte[] states, biomes;
-                RegistryFriendlyByteBuf statesBuf = new RegistryFriendlyByteBuf(new FriendlyByteBuf(statesRaw), chunk.getLevel().registryAccess());
-                section.getStates().write(statesBuf);
-                states = new byte[statesBuf.readableBytes()];
-                statesBuf.readBytes(states);
+                @SuppressWarnings("unchecked")
+                PalettedContainer<BlockState> statesCopy =
+                    ((PalettedContainer<BlockState>) section.getStates()).copy();
 
-                RegistryFriendlyByteBuf biomesBuf = new RegistryFriendlyByteBuf(new FriendlyByteBuf(biomesRaw), chunk.getLevel().registryAccess());
+                FriendlyByteBuf biomesBuf = new FriendlyByteBuf(biomesRaw);
                 section.getBiomes().write(biomesBuf);
-                biomes = new byte[biomesBuf.readableBytes()];
+                byte[] biomes = new byte[biomesBuf.readableBytes()];
                 biomesBuf.readBytes(biomes);
 
                 SectionPos sectionPos = SectionPos.of(pos, sectionY);
@@ -518,25 +502,18 @@ public class NetworkHandler {
                 // so send null instead of a dead 2048-byte array
                 byte[] blData = (bl != null && !isAllZero(bl.getData())) ? bl.getData().clone() : null;
 
-                sections.add(new LODDataPayload.SectionData(
-                    sectionY,
-                    states,
-                    biomes,
-                    blData,
-                    sl != null ? sl.getData().clone() : null
-                ));
+                out.add(new LodSendQueue.PendingSection(
+                    sectionY, statesCopy, biomes, blData,
+                    sl != null ? sl.getData().clone() : null));
             } catch (Throwable t) {
                 VoxyWorldGenV2.LOGGER.debug("skipped section {} of chunk {}: {}", sectionY, pos, t.toString());
             } finally {
-                statesRaw.release();
                 biomesRaw.release();
             }
         }
-
-        return sections;
+        return out;
     }
 
-    // true if every byte is zero, used to drop empty block-light arrays
     private static boolean isAllZero(byte[] data) {
         if (data == null) return true;
         for (byte b : data) {

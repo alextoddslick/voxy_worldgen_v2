@@ -38,6 +38,11 @@ public final class NeoForgeNetworkBridge implements INetworkBridge {
     }
 
     @Override
+    public void startSendQueue() {
+        // NeoForge keeps the executor-pool sender, which needs no explicit start.
+    }
+
+    @Override
     public void shutdown() {
         NetworkHandler.shutdown();
     }

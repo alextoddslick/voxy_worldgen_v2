@@ -13,6 +13,7 @@ public final class ServerEventHandler {
     private ServerEventHandler() {}
 
     public static void onServerStarted(MinecraftServer server) {
+        Services.NETWORK.startSendQueue();
         VoxyWorldGenV2.LOGGER.info("server started, initializing manager");
         ChunkGenerationManager.getInstance().initialize(server);
     }

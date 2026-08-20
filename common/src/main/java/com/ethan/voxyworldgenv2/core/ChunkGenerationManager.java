@@ -113,6 +113,15 @@ public final class ChunkGenerationManager {
         });
     }
 
+    /**
+     * Whether this is an integrated server. The send queue uses it to pick the singleplayer
+     * rate-limit profile, where the data never leaves the machine and throttling only costs frames.
+     */
+    public boolean isSingleplayer() {
+        MinecraftServer s = this.server;
+        return s != null && !s.isDedicatedServer();
+    }
+
     public ServerLevel getCurrentLevel() {
         return currentLevel;
     }
