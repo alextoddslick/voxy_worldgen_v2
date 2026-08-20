@@ -8,6 +8,11 @@ public class VoxyWorldGenV2Client implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
+        // Build stamp. A stale jar on the test machine has cost several debugging rounds; this
+        // line makes "which build is actually running" answerable from the log alone.
+        com.ethan.voxyworldgenv2.VoxyWorldGenV2.LOGGER.info(
+            "[voxy-settings] client init - build 2026-08-20-sodium, sodium present: {}",
+            net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("sodium"));
         VoxyWorldGenV2.LOGGER.info("initializing voxy world gen v2 client");
 
         // pause the worker when the game is paused

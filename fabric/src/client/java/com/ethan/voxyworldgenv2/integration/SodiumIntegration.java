@@ -35,6 +35,8 @@ public class SodiumIntegration implements ConfigEntryPoint {
 
     @Override
     public void registerConfigLate(ConfigBuilder builder) {
+        com.ethan.voxyworldgenv2.VoxyWorldGenV2.LOGGER.info(
+            "[voxy-settings] Sodium config API reached: registering 7 options into Sodium's video settings");
         OptionGroupBuilder display = builder.createOptionGroup()
             .setName(Component.translatable("config.voxyworldgenv2.category.client"))
             .addOption(builder.createBooleanOption(id("f3_stats"))
@@ -99,6 +101,8 @@ public class SodiumIntegration implements ConfigEntryPoint {
         builder.registerOwnModOptions()
             .setName("Voxy World Gen V2")
             .addPage(page);
+        com.ethan.voxyworldgenv2.VoxyWorldGenV2.LOGGER.info(
+            "[voxy-settings] Sodium page registered successfully");
     }
 
     private static void push(java.util.function.UnaryOperator<Config.ServerConfig> edit) {

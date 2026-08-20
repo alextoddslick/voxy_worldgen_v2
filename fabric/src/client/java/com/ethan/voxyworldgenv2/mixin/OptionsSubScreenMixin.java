@@ -40,6 +40,8 @@ public abstract class OptionsSubScreenMixin {
         // Only the video screen; every other options subscreen shares this superclass.
         if (!((Object) this instanceof VideoSettingsScreen)) return;
         if (this.list == null) return;
+        com.ethan.voxyworldgenv2.VoxyWorldGenV2.LOGGER.info(
+            "[voxy-settings] vanilla VideoSettingsScreen reached: adding rows");
 
         this.list.addHeader(Component.translatable("config.voxyworldgenv2.title"));
         List<OptionInstance<?>> client = VoxyOptions.clientRows();
