@@ -110,8 +110,17 @@ public class NetworkClientHandler {
         int i = 0;
         for (; i < snapshot.size() && sectionsThisTick < MAX_SECTIONS_PER_TICK; i++) {
             NetworkHandler.LODDataPayload payload = snapshot.get(i);
-            sectionsThisTick += payload.sections().size();
-            processLODData(level, payload);
+            // Inflate once here and hand the result down: decodeSections() allocates, and the
+            // per-tick budget needs the section count before processing either way.
+            List<NetworkHandler.LODDataPayload.SectionData> decoded;
+            try {
+                decoded = payload.decodeSections();
+            } catch (RuntimeException e) {
+                VoxyWorldGenV2.LOGGER.error("failed to decode LOD data for chunk " + payload.pos(), e);
+                continue;
+            }
+            sectionsThisTick += decoded.size();
+            processLODData(level, payload, decoded);
         }
 
         // put the rest back, dropping the farthest if we're over the cap
@@ -130,38 +139,29 @@ public class NetworkClientHandler {
     }
 
     @SuppressWarnings("unchecked")
-    private static void processLODData(ClientLevel level, NetworkHandler.LODDataPayload payload) {
+    private static void processLODData(ClientLevel level, NetworkHandler.LODDataPayload payload,
+                                       List<NetworkHandler.LODDataPayload.SectionData> sections) {
         // drop data from another dimension or it renders in the wrong world
         if (!level.dimension().equals(payload.dimension())) return;
 
-        long bytes = 0;
-        for (NetworkHandler.LODDataPayload.SectionData sd : payload.sections()) {
-            bytes += sd.states().length;
-            bytes += sd.biomes().length;
-            if (sd.blockLight() != null) bytes += sd.blockLight().length;
-            if (sd.skyLight() != null) bytes += sd.skyLight().length;
-        }
-        NetworkState.incrementReceived(bytes);
+        // Post-deflate bytes, matching what the server metered per player. The F3 overlay's
+        // "bandwidth" line therefore reports real wire traffic, not decompressed terrain size.
+        NetworkState.incrementReceived(payload.wireSize());
 
-        for (NetworkHandler.LODDataPayload.SectionData sectionData : payload.sections()) {
+        for (NetworkHandler.LODDataPayload.SectionData sectionData : sections) {
             io.netty.buffer.ByteBuf statesRaw = io.netty.buffer.Unpooled.wrappedBuffer(sectionData.states());
             io.netty.buffer.ByteBuf biomesRaw = io.netty.buffer.Unpooled.wrappedBuffer(sectionData.biomes());
             try {
                 PalettedContainerFactory factory = PalettedContainerFactory.create(level.registryAccess());
                 LevelChunkSection section = new LevelChunkSection(factory);
 
-                // read back with the registry buf so the palette lines up
-                net.minecraft.network.RegistryFriendlyByteBuf statesBuf = new net.minecraft.network.RegistryFriendlyByteBuf(
-                    new net.minecraft.network.FriendlyByteBuf(statesRaw),
-                    level.registryAccess()
-                );
-                ((PalettedContainer<BlockState>) section.getStates()).read(statesBuf);
-
-                net.minecraft.network.RegistryFriendlyByteBuf biomesBuf = new net.minecraft.network.RegistryFriendlyByteBuf(
-                    new net.minecraft.network.FriendlyByteBuf(biomesRaw),
-                    level.registryAccess()
-                );
-                ((PalettedContainer<Holder<Biome>>) section.getBiomes()).read(biomesBuf);
+                // On 26.2 the palette codec is registry-free: PalettedContainer.read takes a plain
+                // FriendlyByteBuf, and the RegistryAccess it used to need now lives in the factory
+                // above. Wrapping in a RegistryFriendlyByteBuf here would be pure ceremony.
+                ((PalettedContainer<BlockState>) section.getStates())
+                    .read(new net.minecraft.network.FriendlyByteBuf(statesRaw));
+                ((PalettedContainer<Holder<Biome>>) section.getBiomes())
+                    .read(new net.minecraft.network.FriendlyByteBuf(biomesRaw));
 
                 DataLayer bl = sectionData.blockLight() != null ? new DataLayer(sectionData.blockLight()) : null;
                 DataLayer sl = sectionData.skyLight() != null ? new DataLayer(sectionData.skyLight()) : null;
