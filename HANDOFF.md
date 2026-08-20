@@ -22,6 +22,45 @@ plays on has **none** of the fork's features. That is the gap this branch closes
 
 Design: `docs/superpowers/specs/2026-08-19-unified-port-and-spawn-pregen-design.md`
 
+## LOD delivery: how terrain actually reaches a client
+
+Learned the hard way on 2026-08-20, after a visible mid-distance hole. There are exactly THREE
+delivery paths and they do not overlap:
+
+| Band | Path | Reach |
+|---|---|---|
+| Near | `ServerEventHandler.onChunkLoad` | only the vanilla view-distance square |
+| **Middle** | **`ChunkGenerationManager.runCatchup`, alone** | everything from view-distance to `generationRadius` |
+| Far | `NetworkHandler.broadcastLODData` | only chunks JUST generated |
+
+**A pre-generated chunk is never re-broadcast** — `dispatchBatch` filters out anything already in
+`completedChunks`, and a spawn-pregenerated world has tens of thousands of them. So on a
+pre-generated world the middle band depends *entirely* on catch-up throughput. It was capped at 8
+chunks per 400 ms, one player per pass (20/s ceiling, ~1.6/s measured) against a ~51,000-chunk
+annulus — half an hour at best, hours in practice, which presents as a permanent hole.
+
+**The "claimed but not delivered" trap.** Callers mark a chunk synced BEFORE attempting the send
+(`sendLODData`, `broadcastLODData`, and `runCatchup` pre-marks whole batches). Anything that then
+skips the send MUST call `setSyncedState(player, pos, false)`, or `collectCompletedInRange` never
+offers that chunk again and the terrain is missing for the whole session. Four paths in
+`sendAsync` can skip; all four must un-mark. This is the single easiest way to reintroduce the hole.
+
+**Ported components need their driver wired.** Three separate features shipped inert this way:
+`LodSendQueue` (no `startSendQueue`), `TabHud` (no `tick`), and `LodMemory` (entirely orphaned — no
+`record`, `tick` or `onDisconnect` caller, so no known-chunks payload was EVER sent and the join
+gate could only expire on timeout). All present as "the feature does nothing", never as an error.
+When porting, grep for callers of every new class.
+
+**Dead settings to be aware of:** `lodSendDistanceChunks` has no production reader — the real send
+ceiling is `NetworkHandler.syncRadiusSq()`, hardcoded to `generationRadius * 16` blocks.
+
+**Sodium owns the video settings screen.** It ships its own `VideoSettingsScreen` and replaces
+vanilla's, so a mixin on the vanilla screen is never reached in any pack with Sodium. Use the
+`sodium:config_api_user` entrypoint. Sodium's `StatefulOptionBuilderImpl.validateData` requires ALL
+of: name, storage handler, tooltip, default value, binding — plus a value formatter and range for
+integers, and a version on the mod options. It **swallows whatever escapes the entrypoint**, so one
+missing setter makes the whole page silently not exist.
+
 ## Deploying a build
 
 **Every build lands in `~/Downloads/` at the top level, automatically.** Alex tests on a Windows
