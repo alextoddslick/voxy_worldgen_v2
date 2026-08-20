@@ -497,6 +497,18 @@ public final class ChunkGenerationManager {
 
                 int limit = Math.min(remainingSlice[i], budget - dispatched);
                 int sent = dispatchBatch(ds, batch, limit);
+                if (sent == 0) {
+                    // Nothing in that batch was work: every chunk was already done or in flight,
+                    // the throttle is saturated, or the worker is shutting down. dispatchBatch has
+                    // released the batch tracking in each of those cases, so without this guard
+                    // findWork hands the same batch back next iteration and the loop never
+                    // advances -- dispatched and remainingSlice both stay put and the player is
+                    // never marked exhausted. dispatchSpawnPregen has carried the same guard since
+                    // it was written (line 462); this loop was missing it.
+                    exhausted[i] = true;
+                    activePlayers--;
+                    continue;
+                }
                 dispatched += sent;
                 remainingSlice[i] -= sent;
                 if (remainingSlice[i] <= 0) {
@@ -518,10 +530,24 @@ public final class ChunkGenerationManager {
         List<ChunkPos> preFiltered = new ArrayList<>(batch.size());
         for (ChunkPos pos : batch) {
             long key = Services.CHUNK_POS.packPos(pos);
-            if (state.completedChunks.contains(key) || state.trackedChunks.contains(key)) {
+            boolean alreadyDone = state.completedChunks.contains(key);
+            if (alreadyDone || state.trackedChunks.contains(key)) {
                 // already done or in flight, this isn't work. just drop it from the
                 // batch counter, don't re-run onSuccess (which re-marks the graph and
                 // inflates the skipped stat every time a boundary batch comes back)
+                if (alreadyDone) {
+                    // ...but do re-assert it in the distance graph. completedChunks is the source
+                    // of truth and the graph is a derived index; an index that lost a bit leaves
+                    // its batch permanently below 0xFFFF, so findWork offers it on every call and
+                    // dispatchBatch returns 0 for it every time. markChunkCompleted early-returns
+                    // on an already-set bit, so this is idempotent and costs nothing, and it
+                    // retires such a batch on its first offer instead of forever. Nothing
+                    // ungenerated is marked -- this branch only sees completedChunks members.
+                    // Chunks merely in trackedChunks are deliberately left alone; their own
+                    // onSuccess marks them when they land.
+                    state.distanceGraph.markChunkCompleted(
+                        Services.CHUNK_POS.x(pos), Services.CHUNK_POS.z(pos));
+                }
                 decrementBatch(state, pos);
             } else {
                 preFiltered.add(pos);

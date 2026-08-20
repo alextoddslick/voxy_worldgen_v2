@@ -2,7 +2,7 @@
 
 **Worktree:** `~/temp/Github-NOTSYNCED/voxy_worldgen_v2-unified`
 **Branch:** `port/unified-26.2`, cut from `upstream/unified` @ `d1c6372` (upstream `mod_version=2.4.3`)
-**This build is `2.5.0`** — bumped deliberately. Upstream's own 2.4.3 is a different, smaller
+**This build is `2.5.2`** — bumped deliberately. Upstream's own 2.4.3 is a different, smaller
 artifact (it has none of the fork's features), and shipping a superset under the same number made
 "which 2.4.3?" unanswerable from a filename or a log line.
 **Main repo (all other branches):** `~/temp/Github-NOTSYNCED/voxy_worldgen_v2`
@@ -51,6 +51,35 @@ offers that chunk again and the terrain is missing for the whole session. Four p
 gate could only expire on timeout). All present as "the feature does nothing", never as an error.
 When porting, grep for callers of every new class.
 
+## The batch is the unit of work, because it is the unit of completion
+
+Fixed 2.5.1 (hardened in 2.5.2), after the live 26.2 server generated nothing for an hour with its worker pinned at 99%
+of a core. `DistanceGraph` records completion in 4x4 batches and `markChunkCompleted` flags a batch
+full only at mask `0xFFFF` — **all sixteen chunks**. But `findWork` admitted a batch on its
+*nearest corner* (batch-space distance, `rb = (radius+3)>>2`) and then handed out only the chunks
+inside the *chunk-space* radius. Any batch straddling the circle — a ring of ~90 of them at radius
+128, and the count is non-zero at every radius — could therefore never fill. Once the interior was
+done, `findWork` returned one of those forever:
+
+```
+findWork -> boundary batch -> dispatchBatch: every chunk already in completedChunks
+         -> preFiltered empty -> untrack the batch (:531) -> return 0
+         -> dispatchGeneration's while loop advances on nothing -> spin
+```
+
+Two symptoms, both silent. `dispatchGeneration` had no `sent == 0` guard (`dispatchSpawnPregen`
+always had one at :462), so it never returned — which also meant the worker never re-read the
+player list, and stayed anchored to a player who had disconnected half an hour earlier, ignoring
+two teleports into fresh terrain. `dispatchSpawnPregen` did return, and so just quietly stopped
+2,881 chunks short of its radius, once per second, forever.
+
+The fix squares the boundary off: `findWork` returns the whole 4x4 block. It reaches at most 3
+chunks past `generationRadius` — +0.96%, and 89 FEWER than a true radius-128 disc, because the
+batch-space admission test already declined 576 in-radius chunks near the diagonals. A centre-dependent
+completion mask was the alternative and is wrong — the graph is shared between the player anchors
+and the spawn anchor, which have different centres. `DistanceGraphWorkTerminationTest` locks this
+in by draining a radius the way `dispatchBatch` does and asserting `findWork` runs out of work.
+
 **Dead settings to be aware of:** `lodSendDistanceChunks` has no production reader — the real send
 ceiling is `NetworkHandler.syncRadiusSq()`, hardcoded to `generationRadius * 16` blocks.
 
@@ -73,11 +102,11 @@ from there himself.
 
 ```bash
 JAVA_HOME=/opt/homebrew/opt/openjdk@25 ./gradlew :fabric:build
-cp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.5.0.jar" ~/Downloads/
-cp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.5.0.jar" ~/Downloads/voxy-server-mods/
-scp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.5.0.jar" xps@192.168.1.23:~/mc/voxy/mods/
+cp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.5.2.jar" ~/Downloads/
+cp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.5.2.jar" ~/Downloads/voxy-server-mods/
+scp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.5.2.jar" xps@192.168.1.23:~/mc/voxy/mods/
 ssh xps@192.168.1.23 '~/mc-ctl stop && ~/mc-ctl start'
-md5 -q ~/Downloads/"Voxy World Gen V2-fabric-26.2-2.5.0.jar"
+md5 -q ~/Downloads/"Voxy World Gen V2-fabric-26.2-2.5.2.jar"
 ```
 
 Client and server must move together — the merged build is protocol 5, and a mismatched peer is
@@ -190,7 +219,7 @@ and both are deliberately Minecraft-free.
 `:fabric:test` runs **7 classes / 55 tests, all green**: `HarnessTest`, `SyncedChunkStoreTest` (12),
 `RegionBitmaskTest` (13), `ConfigSingleplayerTest` (8), `ConfigPerPlayerTest` (10),
 `PlayerHistoryTest` (5), `SettingsApplierTest` (6). The jar still builds as
-`Voxy World Gen V2-fabric-26.2-2.5.0.jar`.
+`Voxy World Gen V2-fabric-26.2-2.5.2.jar`.
 
 Landed in `fabric/src/main/java`: `core/SyncedChunkStore`, `core/PlayerHistory`,
 `core/SettingsApplier`, `network/RegionBitmask`. All four were pure copies — `SyncedChunkStore` and

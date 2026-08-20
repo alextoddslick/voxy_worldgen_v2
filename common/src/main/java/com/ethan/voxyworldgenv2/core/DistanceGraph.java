@@ -46,15 +46,23 @@ public class DistanceGraph {
         if ((node.fullMask & (1L << idx)) != 0) return;
 
         if (node.level == 1) {
-            Integer mask = (Integer) node.children.getOrDefault(idx, 0);
-            mask |= (1 << bit);
-            if (mask == 0xFFFF) {
-                synchronized(node) {
+            // getOrDefault / OR / put is a read-modify-write, and ConcurrentHashMap does not make
+            // that atomic. Two concurrent marks on the same batch lose a bit, and nothing ever
+            // re-marks a chunk already in completedChunks, so the loss is permanent: a fully
+            // generated batch stuck below 0xFFFF, never full, re-offered by findWork forever --
+            // the same hang as the boundary one, but reachable anywhere in the world. Only
+            // genuinely concurrent on a tellusActive dimension (TellusIntegration.enqueueGenerate
+            // completes on its own pool rather than through server.execute), but the node monitor
+            // was already being taken two lines down, so widening it costs nothing.
+            synchronized (node) {
+                if ((node.fullMask & (1L << idx)) != 0) return;
+                int mask = ((Integer) node.children.getOrDefault(idx, 0)) | (1 << bit);
+                if (mask == 0xFFFF) {
                     node.fullMask |= (1L << idx);
                     node.children.remove(idx);
+                } else {
+                    node.children.put(idx, mask);
                 }
-            } else {
-                node.children.put(idx, mask);
             }
         } else {
             Node child = (Node) node.children.computeIfAbsent(idx, k -> {
@@ -76,12 +84,6 @@ public class DistanceGraph {
         int cbx = Services.CHUNK_POS.x(center) >> BATCH_SIZE_SHIFT;
         int cbz = Services.CHUNK_POS.z(center) >> BATCH_SIZE_SHIFT;
         int rb = (radiusChunks + 3) >> BATCH_SIZE_SHIFT;
-
-        // chunk-space center + radius so we can drop out-of-range chunks from a
-        // boundary batch, otherwise that batch never fills and gets re-pulled forever
-        int ccx = Services.CHUNK_POS.x(center);
-        int ccz = Services.CHUNK_POS.z(center);
-        long radiusSq = (long) radiusChunks * radiusChunks;
 
         PriorityQueue<WorkItem> queue = new PriorityQueue<>(Comparator.comparingDouble(i -> i.distSq));
 
@@ -109,23 +111,25 @@ public class DistanceGraph {
             if (item.level == 0) {
                 long key = Services.CHUNK_POS.asLong(item.x, item.z);
                 if (trackedBatches.add(key)) {
+                    // The whole 4x4 block, never a chunk-radius-filtered subset of it. A batch is
+                    // admitted above on its NEAREST corner (line 145) but markChunkCompleted only
+                    // flags it full at mask 0xFFFF -- all sixteen. Hand out thirteen and the batch
+                    // can never fill, so nothing ever sets its parent's fullMask bit and findWork
+                    // offers it again on the next call; dispatchBatch then finds every chunk in it
+                    // already generated, returns 0, and dispatchGeneration's loop -- which only
+                    // advances on a non-zero return -- spins on it forever. There is a ring of ~90
+                    // such straddling batches at every radius. That froze the live 26.2 server on
+                    // 2026-08-20: worker pinned at 99% of a core, generation dead for an hour.
+                    // Squaring the boundary reaches at most 3 chunks past generationRadius: 487
+                    // chunks outside a radius-128 disc, +0.96%. It is not a net cost -- the
+                    // batch-space test above already declines 576 in-radius chunks near the
+                    // diagonals, so this generates 51,344 chunks where the true disc is 51,433.
+                    // 89 FEWER, and the net stays negative from radius 32 to 256.
                     List<ChunkPos> batch = new ArrayList<>(16);
                     for (int lz = 0; lz < 4; lz++) {
                         for (int lx = 0; lx < 4; lx++) {
-                            int chunkX = (item.x << 2) + lx;
-                            int chunkZ = (item.z << 2) + lz;
-                            long dx = chunkX - ccx;
-                            long dz = chunkZ - ccz;
-                            // only include chunks actually inside the radius
-                            if (dx * dx + dz * dz <= radiusSq) {
-                                batch.add(new ChunkPos(chunkX, chunkZ));
-                            }
+                            batch.add(new ChunkPos((item.x << 2) + lx, (item.z << 2) + lz));
                         }
-                    }
-                    // whole batch was out of range, untrack and keep looking
-                    if (batch.isEmpty()) {
-                        trackedBatches.remove(key);
-                        continue;
                     }
                     return batch;
                 }
