@@ -363,6 +363,16 @@ public final class ChunkGenerationManager {
         if (level == null) return false;
 
         DimensionState ds = getOrSetupState(level);
+
+        // setupLevel is the sole caller of ChunkPersistence.load and the only place state.loaded is
+        // set, and shutdown() persists ONLY loaded states -- so without this the anchor would
+        // re-generate everything on every restart and then silently discard its own progress. It
+        // touches level storage, so it is scheduled onto the server thread and this pass yields.
+        if (!ds.loaded) {
+            srv.execute(() -> setupLevel(level));
+            return false;
+        }
+
         ChunkPos centre = Services.CHUNK_POS.spawnChunk(level);
         int radius = Math.max(1, Config.DATA.spawnPregenRadius);
 
