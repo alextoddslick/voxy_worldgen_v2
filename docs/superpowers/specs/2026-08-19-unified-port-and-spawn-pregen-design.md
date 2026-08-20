@@ -59,16 +59,41 @@ re-homing, not re-porting.
 Gradle subproject (`settings.gradle` includes only `fabric` and `neoforge`). Placement is
 therefore a file-location decision, not a build-graph one.
 
+**Correction (2026-08-19).** An earlier draft put the fork's server half in `common/`. That is
+wrong: `common/` is `srcDir`-merged into **two** modules compiled against **different Minecraft
+versions** — `:fabric` (MC 26.2, `options.release = 25`) and `:neoforge` (MC 1.21.1, Java 21).
+Every line in `common/` must compile against both. The fork's server files use 26.2-only APIs
+(`src.permissions().hasPermission(...)`, `ClickEvent.RunCommand`, `getSelectedSlot()`,
+`chunkPosition().x()`), so they cannot live there.
+
+There is a second, subtler blocker: `VoxyGenCommand`, `SettingsBook` and `TabHud` are themselves
+Fabric-free, but all three read `NetworkHandler.RAW_SECTION_BYTES` / `WIRE_SECTION_BYTES` and call
+`LodSendQueue.getInstance()` — symbols that live in the Fabric module and do not exist on unified
+at all.
+
+**Resolution: the fork's code goes in `fabric/`, not `common/`.** Per Alex, NeoForge is not a
+target. Placing the code in `fabric/src/main/java` satisfies that with strictly less work than the
+alternatives, keeps `:neoforge` compiling for free rather than knowingly breaking it, and leaves
+upstream free to promote files into `common/` later.
+
 | Destination | Files | Origin |
 |---|---|---|
-| `common/src/main/java` | `core/SyncedChunkStore`, `core/PlayerHistory`, `core/SettingsApplier`, `network/RegionBitmask`, `command/VoxyGenCommand`, `command/SettingsBook`, `command/TabHud` | `port/26.2` (already 26.2) except `PlayerHistory`/`SettingsApplier` (from 1.21.1) |
-| `fabric/src/main/java` | `network/LodSendQueue`, NetworkHandler payload additions, command registration | `port/26.2` + merge |
-| `fabric/src/client/java` | `client/LodMemory`, `client/ClientStorageReporter`, `client/VoxyWorldGenSettingsScreen`, `mixin/GuiTabListMixin`, `mixin/PlayerTabOverlayAccessor` | `feature/per-player-limits` (1.21.1 → 26.2) |
+| `fabric/src/main/java` | `core/SyncedChunkStore`, `core/PlayerHistory`, `core/SettingsApplier`, `network/RegionBitmask`, `network/LodSendQueue`, `command/VoxyGenCommand`, `command/SettingsBook`, `command/TabHud`, NetworkHandler merge | `port/26.2` (already 26.2) except `PlayerHistory`/`SettingsApplier` (1.21.1 → 26.2) |
+| `fabric/src/client/java` | `client/LodMemory`, `client/ClientStorageReporter`, `client/VoxyWorldGenSettingsScreen`, `mixin/GuiTabListMixin`, `mixin/PlayerTabOverlayAccessor` | `LodMemory` from `port/26.2` (already 26.2); the other four 1.21.1 → 26.2 |
+| `common/src/main/java` | `core/Config` field merge; `integration/VoxyIntegration.rawIngest` return type | edited in place |
 
-Anything touching Fabric's `CustomPacketPayload` / `ServerPlayNetworking` stays in `fabric/`,
-matching how upstream already places `network/NetworkHandler` there and abstracts the rest
-behind `platform/INetworkBridge`. Brigadier is vanilla, so `command/` can live in `common/`
-with only its registration entrypoint in `fabric/`.
+`common/` is touched in exactly two places, both of which must stay 1.21.1-compatible: the Config
+field additions (plain Java, safe) and `VoxyIntegration.rawIngest`, which must change from `void`
+to `boolean` — LodMemory's correctness depends on recording "Voxy has this", not "a packet
+arrived". Returning `false` for both a failed invoke and unresolvable reflected handles is required
+before LodMemory is ported, or the client records chunks Voxy never received and the server
+permanently skips them.
+
+**Only six files are true 1.21.1 → 26.2 ports.** `origin/port/26.2` already carries 26.2 versions of
+the command suite, `SyncedChunkStore`, `LodSendQueue`, `RegionBitmask`, `NetworkState` and
+`LodMemory`. The genuinely unported files are `ClientStorageReporter`,
+`VoxyWorldGenSettingsScreen`, `PlayerHistory`, `SettingsApplier`, `GuiTabListMixin` and
+`PlayerTabOverlayAccessor`.
 
 ### 2. Config merge
 
@@ -106,11 +131,54 @@ early on `if (players.isEmpty()) return;` and every work-finding path iterates
 **Mechanism.** A virtual anchor at the overworld spawn is injected into the work-finding path
 so an empty player list no longer short-circuits generation.
 
-**The hard part.** An anchor alone generates nothing when the server is empty: as `HANDOFF.md`
-records, *a dimension with no players is parked by the chunk system*, so in-flight work never
-advances. The anchor must therefore hold a chunk ticket at the spawn position to keep the
-overworld ticking. This ticket is the actual engineering content of the feature, and it must be
-released when `spawnPregenEnabled` is false so that disabling the feature is a true rollback.
+**Three blockers, not one.** Corrected 2026-08-19 after bytecode verification; an earlier draft of
+this spec claimed the dimension is "parked by the chunk system" with nobody online. That is false.
+`ServerLevel.tick` calls `ServerChunkCache.tick(haveTime, true)` unconditionally, before the
+`emptyTime` block, and that block only skips dragonFight, entityTickList and blockEntities. The
+chunk system keeps advancing. `HANDOFF.md` never claimed otherwise — it says only that *the mod's
+own worker* idles without a player.
+
+What actually has to be solved:
+
+1. **The whole-server pause.** `MinecraftServer.tickServer` stops ticking an empty dedicated server
+   after `pause-when-empty-seconds` (vanilla default 60), which also silences Fabric's server-tick
+   events. No ticket influences this. Defeat it with `pause-when-empty-seconds=0` in
+   `server.properties` **and** by restoring the `emptyTicks` reset — `((MinecraftServerAccess)
+   server).setEmptyTicks(0);`, which `origin/port/26.2` does at `ChunkGenerationManager.java:706`
+   and which unified dropped (see "Known regression" below).
+2. **The player-anchored work source.** `dispatchGeneration` returns false immediately on
+   `players.size() == 0`, and `activeLevels` is built from `PlayerTracker.getPlayers()`. A
+   player-independent work source is required. `DistanceGraph` needs no change — `findWork`,
+   `countMissingInRange` and `collectCompletedInRange` already take a bare `ChunkPos`. The
+   player-coupling lives entirely in `ChunkGenerationManager`.
+3. **The chunk ticket.** Its job is to raise the `ChunkHolder`'s ticket level so `updateFutures`
+   promotes to FULL and generation starts — not to keep the dimension alive. Use the existing
+   `ChunkPosCompat.addForcedTicket` / `removeForcedTicket` (`TicketType.FORCED`).
+
+**Do not register a custom TicketType yet.** It is the tidier design (flags 14 —
+`FLAG_LOADING | FLAG_SIMULATION | FLAG_KEEP_DIMENSION_ACTIVE`, no `FLAG_PERSIST`), but
+`BuiltInRegistries.TICKET_TYPE` is frozen by `bootStrap()`, and whether Fabric's registry-sync
+unfreezes it at 26.2 is unverified. Failure there is a hard crash at mod init, not a fallback.
+Verify before adopting.
+
+**Ticket persistence is a boot hazard.** `TicketType.FORCED` has `FLAG_PERSIST` (flags=15), so
+tickets are written into the world's `chunk_tickets` SavedData and reactivated by
+`MinecraftServer.prepareLevels()`, whose `do { ... } while (pendingChunks() > 0)` blocks boot until
+every one reaches FULL. A `kill -9` mid-run would leave the next boot hanging on "Loading initial
+chunks". The anchor MUST release deterministically on `SERVER_STOPPING` via the existing
+`releaseAllTickets`, and disabling `spawnPregenEnabled` must also release.
+
+**Reading spawn without a player.** `MinecraftServer.getRespawnData()` returns
+`LevelData$RespawnData` (`dimension()`, `pos()`, `globalPos()`, `yaw()`, `pitch()`). Convert with
+`ChunkPos.containing(BlockPos)`. 26.2 has no spawn chunks, no `spawnChunkRadius` gamerule and no
+`TicketType.START`, so nothing is loaded at spawn by default.
+
+**Ordering trap.** `setupLevel(ServerLevel)` is reachable only from `checkPlayerMovement()`, which
+returns early on an empty player list. It is the sole caller of `ChunkPersistence.load` and the only
+place `state.loaded = true` is set, and `shutdown()` persists only states where `loaded` is true. An
+anchor that bypasses `checkPlayerMovement` will re-generate everything on every restart *and*
+silently discard its progress at shutdown. The anchor must call `setupLevel` (or an extracted
+equivalent) for its dimension.
 
 **Main-thread safety.** Non-negotiable, and the cause of a previous 60-second watchdog kill:
 `ServerChunkCache.getChunk(x, z, load)` is never safe on the main thread, not even with
@@ -155,12 +223,61 @@ Target `xps@192.168.1.23` — Ubuntu 24.04.3, i7-7700HQ (4 cores / 8 threads), *
 - **World:** fresh, vanilla, random seed. No datapacks, no content mods.
 - **Process management:** `screen` session plus a watchdog, mirroring the existing `.29` box.
 
+### 5b. Known regression to fix in passing
+
+`upstream/unified`'s `ChunkGenerationManager.java:692` carries the comment *"old emptyTicks reset is
+gone, that field isn't here and the pause check covers it"* and drops the reset. That comment was
+copied from the 1.21.1 branches, where it is true. On 26.2 it is false: `MinecraftServer` does have
+`private int emptyTicks`, the `MinecraftServerAccess` `@Accessor` is still compiled and still listed
+in `voxyworldgenv2.mixins.json`, and nothing calls it. `origin/port/26.2` does it correctly at
+line 706. This is directly load-bearing for spawn pre-generation.
+
+### 5c. Client GUI port surface (26.2 render model)
+
+The four unported client files hit a changed render model, not just renames. Verified by `javap`
+against `minecraft-clientonly-deobf-26.2.jar`:
+
+- `GuiGraphics` no longer exists — it is `GuiGraphicsExtractor`. `Screen.render(GuiGraphics,int,int,float)`
+  is **gone**; the hierarchy is state-extraction now (`extractRenderState(GuiGraphicsExtractor,int,int,float)`).
+  Any port assuming draw-order side effects will silently misbehave.
+- `drawString` → `text`, `drawCenteredString` → `centeredText`. `fill` is unchanged.
+- **Alpha is mandatory.** `text(Font, FormattedCharSequence, int, int, int, boolean)` opens with
+  `ARGB.alpha(color); ifne 9; return` — a zero-alpha color draws nothing, with no `|= 0xFF000000`
+  fixup. The settings screen's `0xFFFFFF` / `0xA0A0A0` / `0x707070` must all become `0xFF`-prefixed.
+- `Minecraft.setScreen` and `Minecraft.screen` are gone: use `mc.gui.screen()` / `mc.gui.setScreen(...)`.
+- `Gui.renderTabList` / `getTabList()` are gone; the gate moved to `Hud.extractTabList`. The
+  `@Redirect` on `Minecraft.isLocalServer()Z` still applies — retarget to `@Mixin(Hud.class)`.
+- `PlayerTabOverlayAccessor` ports unchanged — `PlayerTabOverlay` still has `private Component footer`.
+- Widget APIs are unchanged: `Button.builder/bounds/build`, `AbstractSliderButton`'s ctor,
+  `protected double value`, `updateMessage()`, `applyValue()`. The `LabeledSlider` inner class ports verbatim.
+
 ### 6. Testing
 
-- The existing `HandshakePayloadTest` covers protocol round-tripping; it is extended to the
-  protocol-5 payload set. TDD applies to new logic.
-- `RegionBitmask` has an existing codec test including the understated-`Inflater`-`rawLength`
-  case; it must keep passing after re-homing.
+Unified has **no working test harness**: its only test is
+`fabric/src/test/java/.../network/SmokeTest.java`, and omitting `test { useJUnitPlatform() }` is a
+hard failure on Gradle 9.5.1 (*"test sources present ... did not discover any tests"*), not a silent
+skip. Standing that up is the first task of the first plan.
+
+Twelve pure-JVM tests come across from the fork: `ClientStorageReporterTest`, `ConfigPerPlayerTest`,
+`ConfigSingleplayerTest`, `PlayerHistoryTest`, `SettingsApplierTest`, `SyncedChunkStoreTest`,
+`HandshakePayloadTest`, `LODDataPayloadTest`, `RegionBitmaskTest`, `SendDistanceTest`,
+`SettingsPayloadTest`, `StorageReportPayloadTest`.
+
+Constraints that govern them:
+
+- **Never call `Config.load()`/`save()` from a test.** Both reach `Services.PLATFORM.getConfigDir()`,
+  which throws without loader ServiceLoader bindings. The fork's `@BeforeEach { Config.DATA = new
+  Config.ConfigData(); }` pattern is why its tests run headless — preserve it. Relatedly, unified's
+  `CONFIG_PATH` is a **static final** resolved at class-init, so merely touching `Config` triggers
+  `Services.load()`; the fork's lazy `getConfigPath()` with a `Path.of("config", ...)` fallback must
+  come across or every Config test dies with `ExceptionInInitializerError`.
+- **Protocol gates are floors (`>=`), never equality.** `supportsKnownChunks()` is `serverProtocol >= 2`,
+  `supportsStorageReport()` is `>= 3`. Write new assertions as `>= 5`, never `assertEquals(5, ...)`.
+- **`NetworkState` is global mutable static state.** Tests reset it in `try/finally`; porting
+  `setServerConnected` without zeroing `serverProtocol` in the false branch leaks state between tests.
+- `HandshakePayloadTest` will not compile as-is (it references `NetworkHandler.PROTOCOL_VERSION`,
+  which unified moved to `VoxyWorldGenV2`), and will still fail until the fork's tolerant reader
+  `buf.isReadable() ? buf.readVarInt() : 1` lands.
 - New unit coverage for the spawn anchor: radius math, and that `spawnPregenEnabled=false`
   releases the ticket.
 - Build gate: `./gradlew :fabric:build` with `JAVA_HOME=/opt/homebrew/opt/openjdk@25` (arm64
@@ -189,7 +306,32 @@ JAVA_HOME=/opt/homebrew/opt/openjdk@25 ./gradlew :fabric:build
 | Protocol 5 silently mismatches the pack | Client and server jars are built from this one tree and deployed together |
 | 8 GB is simply too little for radius 128 | Radius is config-driven; lower it, or add a SODIMM |
 
+## Plan decomposition
+
+This spec is executed as five sequential plans, each producing working, testable software:
+
+1. **Foundation** — test harness, Config merge, and the pure-JVM classes (`SyncedChunkStore`,
+   `RegionBitmask`, `PlayerHistory`, `SettingsApplier`) with their tests green.
+2. **Network reconciliation** — merge the two `NetworkHandler`s, protocol 5, `LodSendQueue`, the
+   modded gate vs the join gate.
+3. **Commands and client GUI** — `command/` suite, settings screen, tab HUD, `LodMemory`.
+4. **Spawn pre-generation** — the three blockers in Section 4.
+5. **Deployment** — Section 5.
+
+## Existing deployments are safe
+
+`ChunkPersistence.java` and `QueuedChunk.java` are **byte-identical** between `origin/port/26.2` and
+`upstream/unified` (verified by `diff`). The on-disk `voxy_gen_<dim>.bin` format — including the
+filename-with-spaces quirk from `getDimensionId` — is compatible across both lineages, so any
+existing cache survives the merge untouched. Do not "fix" the spaces in that filename: it would
+orphan every cache file on the deployment box.
+
 ## Open items
 
 - Whether to also refresh the modpack's other mods; out of scope here, the pack is left as-is
   apart from the voxyworldgenv2 jar.
+- `upstream/unified` has no `HANDOFF.md`, which Alex's standing rule requires for every project.
+  Plan 1 creates one. Whether to carry `CONTRIBUTING.txt` across is open — its three prose rules are
+  the repo's only style gate (there is no CI, checkstyle, spotless or git hook anywhere).
+- `Config.refreshPermissionLevel` is an int 0-4 with no direct 26.2 analogue; 26.2 uses
+  `Permissions.COMMANDS_MODERATOR/GAMEMASTER/ADMIN/OWNER`. A mapping decision is needed in plan 3.
