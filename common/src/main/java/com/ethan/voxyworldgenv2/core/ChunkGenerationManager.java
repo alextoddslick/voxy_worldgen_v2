@@ -217,7 +217,15 @@ public final class ChunkGenerationManager {
                 // around a vanilla or non voxy client is wasted work so skip them
                 List<ServerPlayer> players = moddedPlayers();
                 if (players.isEmpty()) {
-                    Thread.sleep(1000);
+                    // Nobody online. The chunk system still ticks (ServerChunkCache.tick runs
+                    // unconditionally in ServerLevel.tick), so the only thing stopping progress is
+                    // that every work source above is player-anchored. Fall through to the spawn
+                    // anchor rather than idling.
+                    // Its own budget: the player budget below is computed from the player list.
+                    // The throttle semaphore still bounds concurrency, and the sleep paces passes
+                    // so an empty server fills steadily rather than spinning.
+                    int idleBudget = Math.max(1, Config.getMaxActiveTasks(isSingleplayer()) / 2);
+                    Thread.sleep(dispatchSpawnPregen(idleBudget) ? 50 : 1000);
                     continue;
                 }
 
@@ -328,6 +336,43 @@ public final class ChunkGenerationManager {
 
     // generate missing chunks nearest first, one batch per player per pass so one
     // player with a big frontier can't eat the whole budget and starve the rest
+    /**
+     * Fills a radius around world spawn while the server is empty.
+     *
+     * <p>Deliberately routed through {@link #getOrSetupState} rather than a fresh state: setupLevel
+     * is the sole caller of ChunkPersistence.load and the only place {@code state.loaded} is set,
+     * and shutdown() persists only loaded states. An anchor that bypassed it would re-generate
+     * everything on every restart and then silently discard its own progress at shutdown.
+     *
+     * <p>Chunk tickets are taken by dispatchBatch exactly as they are for a player, and released by
+     * cleanupTask and releaseAllTickets on SERVER_STOPPING. That matters: TicketType.FORCED carries
+     * FLAG_PERSIST, so tickets left behind are written into the world's chunk_tickets SavedData and
+     * reactivated by MinecraftServer.prepareLevels(), which blocks boot until every one reaches
+     * FULL. A kill -9 mid-run would otherwise hang the next start on "Loading initial chunks".
+     */
+    private boolean dispatchSpawnPregen(int budget) {
+        if (!Config.DATA.spawnPregenEnabled) return false;
+        MinecraftServer srv = this.server;
+        if (srv == null) return false;
+
+        ServerLevel level = srv.overworld();
+        if (level == null) return false;
+
+        DimensionState ds = getOrSetupState(level);
+        ChunkPos centre = Services.CHUNK_POS.spawnChunk(level);
+        int radius = Math.max(1, Config.DATA.spawnPregenRadius);
+
+        int dispatched = 0;
+        while (dispatched < budget) {
+            List<ChunkPos> batch = ds.distanceGraph.findWork(centre, radius, ds.trackedBatches);
+            if (batch == null) break; // radius is full
+            int sent = dispatchBatch(ds, batch, budget - dispatched);
+            if (sent == 0) break;
+            dispatched += sent;
+        }
+        return dispatched > 0;
+    }
+
     private boolean dispatchGeneration(List<ServerPlayer> players, int budget) {
         int dispatched = 0;
         int n = players.size();
@@ -710,7 +755,13 @@ public final class ChunkGenerationManager {
     
     private void cleanupTask(ServerLevel level, ChunkPos pos) {
         queueTicketRemove(level, pos);
-        // old emptyTicks reset is gone, that field isn't here and the pause check covers it
+        // Keep the server from pausing itself while we are still generating. MinecraftServer stops
+        // ticking an empty dedicated server after pause-when-empty-seconds, which also silences the
+        // Fabric server-tick events, and no chunk ticket influences that. The upstream comment here
+        // claimed the field does not exist on this version; it does -- MinecraftServer.emptyTicks is
+        // private, MinecraftServerAccess is the @Accessor for it, and nothing was calling it.
+        MinecraftServer srv = this.server;
+        if (srv != null) ((com.ethan.voxyworldgenv2.mixin.MinecraftServerAccess) srv).setEmptyTicks(0);
         DimensionState state = dimensionStates.get(level.dimension());
         if (state != null) completeTask(state, pos);
     }

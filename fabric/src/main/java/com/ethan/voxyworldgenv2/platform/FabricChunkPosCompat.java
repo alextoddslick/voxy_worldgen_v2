@@ -49,6 +49,11 @@ public final class FabricChunkPosCompat implements ChunkPosCompat {
     }
 
     @Override
+    public ChunkPos spawnChunk(ServerLevel level) {
+        return net.minecraft.world.level.ChunkPos.containing(level.getRespawnData().pos());
+    }
+
+    @Override
     public void addForcedTicket(ServerChunkCache cache, ChunkPos pos) {
         cache.addTicketWithRadius(TicketType.FORCED, pos, 0);
     }

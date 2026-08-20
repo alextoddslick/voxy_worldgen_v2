@@ -50,6 +50,11 @@ public final class NeoForgeChunkPosCompat implements ChunkPosCompat {
     }
 
     @Override
+    public ChunkPos spawnChunk(ServerLevel level) {
+        return new net.minecraft.world.level.ChunkPos(level.getSharedSpawnPos());
+    }
+
+    @Override
     public void addForcedTicket(ServerChunkCache cache, ChunkPos pos) {
         // forced tickets carry the chunkpos as their value here
         cache.addRegionTicket(TicketType.FORCED, pos, 0, pos);

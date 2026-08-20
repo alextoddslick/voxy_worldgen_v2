@@ -28,6 +28,12 @@ public interface ChunkPosCompat {
     // go through the compat layer like everything else that moved.
     String dimensionId(ResourceKey<Level> dimension);
 
+    /**
+     * The world spawn as a chunk position, read without a player. 26.2 has no spawn chunks, no
+     * spawnChunkRadius gamerule and no TicketType.START, so the anchor supplies its own position.
+     */
+    ChunkPos spawnChunk(ServerLevel level);
+
     // pin a chunk with a forced ticket
     void addForcedTicket(ServerChunkCache cache, ChunkPos pos);
 

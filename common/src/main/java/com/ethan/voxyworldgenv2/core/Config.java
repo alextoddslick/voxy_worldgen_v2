@@ -238,6 +238,13 @@ public final class Config {
         public int refreshPermissionLevel = 2;
         // What "/voxygen refresh near" means, in chunks.
         public int refreshDefaultRadius = 16;
+        // Keep filling a radius around world spawn when nobody is online. The chunk system keeps
+        // ticking on an empty server, but the mod's worker is player-anchored, so without this it
+        // simply idles. Rate-limited through maxChunksPerSecond like everything else.
+        public boolean spawnPregenEnabled = true;
+        // Radius in chunks around spawn. 128 is ~205k chunks: a multi-hour to multi-day background
+        // fill on a 4-core box, which is what it is designed for.
+        public int spawnPregenRadius = 128;
     }
 
     /**
