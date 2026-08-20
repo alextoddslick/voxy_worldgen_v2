@@ -1,7 +1,10 @@
 # Voxy World Gen V2 — unified port handoff
 
 **Worktree:** `~/temp/Github-NOTSYNCED/voxy_worldgen_v2-unified`
-**Branch:** `port/unified-26.2`, cut from `upstream/unified` @ `d1c6372` (`mod_version=2.4.3`)
+**Branch:** `port/unified-26.2`, cut from `upstream/unified` @ `d1c6372` (upstream `mod_version=2.4.3`)
+**This build is `2.5.0`** — bumped deliberately. Upstream's own 2.4.3 is a different, smaller
+artifact (it has none of the fork's features), and shipping a superset under the same number made
+"which 2.4.3?" unanswerable from a filename or a log line.
 **Main repo (all other branches):** `~/temp/Github-NOTSYNCED/voxy_worldgen_v2`
 
 ## What this branch is
@@ -31,11 +34,11 @@ from there himself.
 
 ```bash
 JAVA_HOME=/opt/homebrew/opt/openjdk@25 ./gradlew :fabric:build
-cp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.4.3.jar" ~/Downloads/
-cp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.4.3.jar" ~/Downloads/voxy-server-mods/
-scp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.4.3.jar" xps@192.168.1.23:~/mc/voxy/mods/
+cp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.5.0.jar" ~/Downloads/
+cp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.5.0.jar" ~/Downloads/voxy-server-mods/
+scp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.5.0.jar" xps@192.168.1.23:~/mc/voxy/mods/
 ssh xps@192.168.1.23 '~/mc-ctl stop && ~/mc-ctl start'
-md5 -q ~/Downloads/"Voxy World Gen V2-fabric-26.2-2.4.3.jar"
+md5 -q ~/Downloads/"Voxy World Gen V2-fabric-26.2-2.5.0.jar"
 ```
 
 Client and server must move together — the merged build is protocol 5, and a mismatched peer is
@@ -148,7 +151,7 @@ and both are deliberately Minecraft-free.
 `:fabric:test` runs **7 classes / 55 tests, all green**: `HarnessTest`, `SyncedChunkStoreTest` (12),
 `RegionBitmaskTest` (13), `ConfigSingleplayerTest` (8), `ConfigPerPlayerTest` (10),
 `PlayerHistoryTest` (5), `SettingsApplierTest` (6). The jar still builds as
-`Voxy World Gen V2-fabric-26.2-2.4.3.jar`.
+`Voxy World Gen V2-fabric-26.2-2.5.0.jar`.
 
 Landed in `fabric/src/main/java`: `core/SyncedChunkStore`, `core/PlayerHistory`,
 `core/SettingsApplier`, `network/RegionBitmask`. All four were pure copies — `SyncedChunkStore` and
