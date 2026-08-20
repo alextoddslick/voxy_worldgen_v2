@@ -116,6 +116,34 @@ half-connect to this server. `HANDOFF.md` establishes that a mismatch drops the 
 cleanly rather than corrupting state, which is the desired behavior. Both the client jar (for
 the modpack) and the server jar come out of this one tree, so they cannot drift.
 
+### 3b. Network merge decisions (settled 2026-08-19)
+
+The two lineages diverged on more than payload shapes; these are the two behavioural choices that
+govern plan 2.
+
+**Generation gating — the fork's join gate wins.** Unified gates the entire worker on
+`PlayerTracker.isModded(uuid)`, set only when the handshake ack reports an exactly matching
+protocol, so a vanilla client gets nothing. The fork instead uses `PlayerTracker.isGated(uuid,
+dimensionId)`, a time-boxed join gate driven by `Config.knownChunksTimeoutSeconds` that withholds
+LOD data while waiting for the client's known-chunks upload and **expires open**, so a vanilla
+client behaves exactly as it did before the feature existed. The join gate is what makes the
+reconnect-egress saving real, which is the entire point of `LodMemory`; the modded gate is
+discarded.
+
+**Send path — the fork's compression, unified's drain queue.** Keep the fork's dedicated send
+thread (`LodSendQueue`, bounded `ArrayBlockingQueue(512)`, dropping on overflow and returning false
+so the caller leaves the chunk unsynced), its whole-batch deflate, and its RAW/WIRE byte
+accounting: per-player Mbps caps are only honest when metered on post-deflate wire bytes. Keep
+unified's client-side drain queue (96 sections/tick, nearest-first) on top of it, because a large
+LOD burst ingested synchronously stutters the client. Unified's uncompressed `List<SectionData>`
+payload and its `SEND_POOL` are discarded.
+
+Consequences to carry into the plan: `LODDataPayload` becomes the fork's shape (`plainLength` +
+deflated `byte[] body`, `StreamCodec<FriendlyByteBuf, ...>`), which is also the only shape that is
+unit-testable — unified's `RegistryFriendlyByteBuf` codec cannot be constructed without
+bootstrapping the game. Unified's `syncRadiusSq()` range semantics are kept over the fork's
+hardcoded 4096-block constant, since `INetworkBridge` already exposes it.
+
 ### 4. Spawn-anchored pre-generation
 
 **Problem.** Generation today is strictly player-anchored: `ChunkGenerationManager` returns
