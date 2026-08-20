@@ -145,22 +145,31 @@ public final class VoxyIntegration {
         }
     }
     
-    public static void rawIngest(net.minecraft.world.level.Level level, net.minecraft.world.level.chunk.LevelChunkSection section, int cx, int cy, int cz, net.minecraft.world.level.chunk.DataLayer blockLight, net.minecraft.world.level.chunk.DataLayer skyLight) {
+    /**
+     * @return true only when Voxy actually took the section. The client's LOD memory records what
+     *         it reports here and the server permanently skips re-sending those chunks, so this
+     *         must mean "Voxy has this", never "a packet arrived". An unresolvable reflected handle
+     *         and a failed invoke are both false: recording either as success leaves the player
+     *         with holes no re-send will ever fill.
+     */
+    public static boolean rawIngest(net.minecraft.world.level.Level level, net.minecraft.world.level.chunk.LevelChunkSection section, int cx, int cy, int cz, net.minecraft.world.level.chunk.DataLayer blockLight, net.minecraft.world.level.chunk.DataLayer skyLight) {
         if (!initialized) initialize();
-        if (rawIngestMethod == null || worldIdentifierOfMethod == null) return;
+        if (rawIngestMethod == null || worldIdentifierOfMethod == null) return false;
 
         try {
             Object worldId = worldIdentifierOfMethod.invoke(level);
-            if (worldId == null) return;
-            
+            if (worldId == null) return false;
+
             rawIngestMethod.invoke(worldId, section, cx, cy, cz, blockLight, skyLight);
+            return true;
         } catch (Throwable e) {
             VoxyWorldGenV2.LOGGER.error("failed to raw ingest section", e);
+            return false;
         }
     }
 
-    public static void rawIngest(net.minecraft.world.level.Level level, net.minecraft.world.level.chunk.LevelChunkSection section, int cx, int cy, int cz, net.minecraft.world.level.chunk.DataLayer skyLight) {
-        rawIngest(level, section, cx, cy, cz, null, skyLight);
+    public static boolean rawIngest(net.minecraft.world.level.Level level, net.minecraft.world.level.chunk.LevelChunkSection section, int cx, int cy, int cz, net.minecraft.world.level.chunk.DataLayer skyLight) {
+        return rawIngest(level, section, cx, cy, cz, null, skyLight);
     }
 
     public static boolean isVoxyAvailable() {

@@ -43,6 +43,17 @@ public final class NeoForgeNetworkBridge implements INetworkBridge {
     }
 
     @Override
+    public boolean isSendQueueSaturated() {
+        // NeoForge keeps the executor pool, which applies back-pressure via CallerRunsPolicy.
+        return false;
+    }
+
+    @Override
+    public java.util.Map<java.util.UUID, Long> perPlayerWireBytes() {
+        return java.util.Map.of();
+    }
+
+    @Override
     public void shutdown() {
         NetworkHandler.shutdown();
     }

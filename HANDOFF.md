@@ -70,12 +70,43 @@ Verify with `grep -rn "net.fabricmc" common/src/main/java/` — it must return n
 | # | Plan | Status |
 |---|---|---|
 | 1 | Foundation — test harness, Config merge, pure-JVM classes | **done** |
-| 2 | Network reconciliation — merge the two NetworkHandlers, protocol 5, LodSendQueue | not started |
+| 2 | Network reconciliation — merge the two NetworkHandlers, protocol 5, LodSendQueue | **done** |
 | 3 | Commands and client GUI — `command/`, settings screen, tab HUD, LodMemory | not started |
 | 4 | Spawn pre-generation | not started |
 | 5 | Deployment to `xps@192.168.1.23` | not started |
 
 Plan 1: `docs/superpowers/plans/2026-08-19-plan1-foundation.md`
+Plan 2: `docs/superpowers/plans/2026-08-19-plan2-network-reconciliation.md`
+
+## State after plan 2
+
+`:fabric:test` runs **12 classes / 72 tests, all green**. The wire format is **protocol 5**, declared
+on `fabric/.../network/NetworkHandler.java`; `:neoforge` keeps its own at 1 and `common/` has none.
+
+Nine payloads are registered: `HandshakePayload` (both directions), `HandshakeAckPayload`,
+`LODDataPayload`, `ServerConfigPayload`, `ServerConfigPushPayload`, `KnownChunksPayload`,
+`StorageReportPayload`, `SettingsSnapshotPayload`, `SettingsUpdatePayload`.
+
+What changed in behaviour, beyond new payloads:
+
+- **The modded gate is gone.** Generation and streaming are no longer gated on the client having the
+  mod; the time-boxed join gate decides who LOD data is withheld from, and it expires open after
+  `knownChunksTimeoutSeconds`. A vanilla player now causes generation where previously they did not.
+- **`LODDataPayload` carries a deflated body.** Compression happens once in `of()` on the sender
+  thread, so the payload knows its wire size before sending — the precondition for honest per-player
+  Mbps caps. `NetworkState` counters and the F3 lines now mean post-deflate bytes and are labelled
+  "wire"; they read ~3-6x lower than before, which is a relabel, not a regression.
+- **Palette serialisation moved off the tick thread.** `snapshotSections` takes a
+  `PalettedContainer.copy()` on the main thread (a live container is guarded by a `ThreadingDetector`)
+  and `LodSendQueue`'s single sender thread does the encode. **No test exercises this** — it only
+  proves itself under load.
+- **`PlayerTracker` is dimension-keyed.** Synced sets live in a per-player `SyncedChunkStore` keyed by
+  dimension id, so a portal trip no longer discards the overworld's progress.
+- **`rawIngest` returns `boolean`.** It must mean "Voxy has this", not "a packet arrived" — the client
+  records what it reports and the server permanently skips those chunks.
+
+`SyncedChunkStore` and `RegionBitmask` now live in `common/`, not `fabric/`: `PlayerTracker` uses them
+and both are deliberately Minecraft-free.
 
 ## State after plan 1
 

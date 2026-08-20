@@ -69,9 +69,14 @@ public final class DebugRenderer implements DebugScreenEntry {
             double bwRate = com.ethan.voxyworldgenv2.network.NetworkState.getBandwidthRate();
             lines.add("mode: multiplayer (connected)");
             lines.add("rate: " + String.format("%.1f", netRate) + " c/s");
-            lines.add("bandwidth: " + formatBytes((long) bwRate) + "/s");
-            lines.add("received: " + formatNumber(com.ethan.voxyworldgenv2.network.NetworkState.getChunksReceived())
-                + " (" + formatBytes(com.ethan.voxyworldgenv2.network.NetworkState.getBytesReceived()) + ")");
+            // Deliberately labelled "wire": these count post-deflate bytes, matching what the
+            // server metered per player. They read ~3-6x lower than the decompressed terrain size
+            // this used to show, which is a relabel, not a regression.
+            if (com.ethan.voxyworldgenv2.core.Config.DATA.hudShowCompressed) {
+                lines.add("wire: " + formatBytes((long) bwRate) + "/s");
+                lines.add("received: " + formatNumber(com.ethan.voxyworldgenv2.network.NetworkState.getChunksReceived())
+                    + " (" + formatBytes(com.ethan.voxyworldgenv2.network.NetworkState.getBytesReceived()) + " wire)");
+            }
             lines.add("voxy: " + (VoxyIntegration.isVoxyAvailable() ? "enabled" : "disabled"));
         } else {
             lines.add("mode: multiplayer (no voxy server)");

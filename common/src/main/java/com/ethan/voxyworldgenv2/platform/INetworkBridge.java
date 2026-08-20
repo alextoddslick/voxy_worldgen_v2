@@ -26,5 +26,11 @@ public interface INetworkBridge {
      */
     void startSendQueue();
 
+    /** True when the sender is at capacity, so callers can back off rather than queue and drop. */
+    boolean isSendQueueSaturated();
+
+    /** Post-deflate bytes sent to each player, for the settings screen's per-player table. */
+    java.util.Map<java.util.UUID, Long> perPlayerWireBytes();
+
     void shutdown();
 }

@@ -43,6 +43,17 @@ public final class FabricNetworkBridge implements INetworkBridge {
     }
 
     @Override
+    public boolean isSendQueueSaturated() {
+        var q = com.ethan.voxyworldgenv2.network.LodSendQueue.getInstance();
+        return q.getQueuedJobs() >= q.getMaxQueuedJobs();
+    }
+
+    @Override
+    public java.util.Map<java.util.UUID, Long> perPlayerWireBytes() {
+        return com.ethan.voxyworldgenv2.network.LodSendQueue.getInstance().getPerPlayerBytes();
+    }
+
+    @Override
     public void shutdown() {
         NetworkHandler.shutdown();
     }
