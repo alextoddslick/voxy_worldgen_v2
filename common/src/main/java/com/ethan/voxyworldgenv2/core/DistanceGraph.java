@@ -191,6 +191,9 @@ public class DistanceGraph {
         int cbx = Services.CHUNK_POS.x(center) >> BATCH_SIZE_SHIFT;
         int cbz = Services.CHUNK_POS.z(center) >> BATCH_SIZE_SHIFT;
         int rb = (radiusChunks + 3) >> BATCH_SIZE_SHIFT;
+        final int centerX = Services.CHUNK_POS.x(center);
+        final int centerZ = Services.CHUNK_POS.z(center);
+        final long chunkRadiusSq = (long) radiusChunks * radiusChunks;
 
         // use a priority queue to process chunks from nearest to farthest
         PriorityQueue<CollectItem> queue = new PriorityQueue<>(Comparator.comparingDouble(i -> i.distSq));
@@ -225,6 +228,13 @@ public class DistanceGraph {
                         int lx = i & 3;
                         int lz = i >> 2;
                         ChunkPos pos = new ChunkPos((item.x << 2) + lx, (item.z << 2) + lz);
+                        // Per-chunk radius filter, mirroring findWork. The batch-level test above
+                        // works in 4-chunk units, so without this the emit reaches ~3 chunks past
+                        // radiusChunks -- and the send path's own range check then rejects exactly
+                        // those, forever: claimed, rejected, un-marked, re-collected next pass.
+                        int dxc = Services.CHUNK_POS.x(pos) - centerX;
+                        int dzc = Services.CHUNK_POS.z(pos) - centerZ;
+                        if ((long) dxc * dxc + (long) dzc * dzc > chunkRadiusSq) continue;
                         if (!alreadySynced.contains(Services.CHUNK_POS.packPos(pos))) {
                             out.add(pos);
                             if (out.size() >= maxResults) return;

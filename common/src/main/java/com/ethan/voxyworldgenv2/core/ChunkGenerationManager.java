@@ -89,9 +89,14 @@ public final class ChunkGenerationManager {
     private static final int SYNC_PRUNE_INTERVAL_TICKS = 600;
 
     // only run catchup every so often, it doesn't need to fire every loop
-    private static final long CATCHUP_INTERVAL_MS = 400;
+    // Catch-up is the ONLY delivery path for everything between the vanilla view-distance shell and
+    // the generation frontier -- tens of thousands of chunks on a pre-generated world. At the old
+    // 8-per-400ms it could deliver 20 chunks/s, which is over half an hour of standing still for a
+    // radius-128 annulus, and it measured far worse. The real back-pressure is the outstanding-load
+    // ceiling and the send queue's own bound, not an arbitrary interval.
+    private static final long CATCHUP_INTERVAL_MS = 100;
     // chunks resent per catchup pass per player, kept small to avoid tick spikes
-    private static final int CATCHUP_BATCH = 8;
+    private static final int CATCHUP_BATCH = 64;
     // Catch-up force-loads chunks off disk every worker iteration. Without a ceiling on outstanding
     // loads it force-loads faster than the chunk system retires them and the heap is gone in seconds.
     private static final int MAX_CATCHUP_LOADS_IN_FLIGHT = 128;
@@ -381,14 +386,21 @@ public final class ChunkGenerationManager {
                             Services.CHUNK_POS.x(pos), Services.CHUNK_POS.z(pos), ChunkStatus.FULL, true)
                         .whenCompleteAsync((result, throwable) -> {
                             ServerPlayer target = server.getPlayerList().getPlayer(uuid);
+                            // Track whether the send ACTUALLY happened. The previous shape attached
+                            // the else-if to the outer condition, so a successful load whose send was
+                            // skipped -- player logged off mid-load, or an empty chunk -- fell through
+                            // both branches: not sent, not deferred, and still claimed from the
+                            // pre-mark above. That chunk was then lost for the session.
+                            boolean sent = false;
                             if (throwable == null && result != null && result.isSuccess()
                                     && result.orElse(null) instanceof LevelChunk chunk) {
                                 if (target != null && !chunk.isEmpty()) {
                                     Services.NETWORK.sendLODData(target, chunk);
+                                    sent = true;
                                 }
-                            } else if (store != null && Config.DATA.rememberSentChunks) {
-                                // The load failed and the batch was already pre-marked synced, so
-                                // without this the chunk is claimed and never arrives.
+                            }
+                            if (!sent && store != null && Config.DATA.rememberSentChunks) {
+                                // Claimed but not delivered; onChunkLoad re-sends it on the next load.
                                 store.markDeferred(dimId, Services.CHUNK_POS.packPos(pos));
                             }
                             // Release the ticket only. This chunk was never a generation task, so
@@ -398,7 +410,9 @@ public final class ChunkGenerationManager {
                         }, server);
                 }
             });
-            return; // one player per call
+            // Continue rather than return: the outstanding-load ceiling above is the real
+            // back-pressure, so there is no reason to make other players wait a full pass.
+            continue;
         }
     }
 
