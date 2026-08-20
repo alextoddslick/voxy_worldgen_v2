@@ -35,3 +35,8 @@ Thumbs.db
 
 # misc
 *.log
+
+# Loom writes run logs into the module dirs; they are build output, not source.
+fabric/logs/
+neoforge/logs/
+run/
