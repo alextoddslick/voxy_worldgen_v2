@@ -20,6 +20,8 @@ public class VoxyWorldGenV2Fabric implements ModInitializer {
 
         ServerLifecycleEvents.SERVER_STARTED.register(ServerEventHandler::onServerStarted);
         ServerLifecycleEvents.SERVER_STOPPING.register(ServerEventHandler::onServerStopping);
+        // Subscriptions deliberately survive a relog, so only a shutdown clears them.
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> com.ethan.voxyworldgenv2.command.TabHud.clear());
 
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) ->
                 ServerEventHandler.onPlayerJoin(handler.getPlayer()));
@@ -32,6 +34,23 @@ public class VoxyWorldGenV2Fabric implements ModInitializer {
                 com.ethan.voxyworldgenv2.command.VoxyGenCommand.register(dispatcher));
 
         ServerTickEvents.END_SERVER_TICK.register(ServerEventHandler::onServerTick);
+
+        // Repaint the /voxygen log HUD once a second. TabHud rewrites the tab header/footer, so
+        // without a driver it paints exactly once at toggle time and then looks frozen, which is
+        // indistinguishable from the command not working. Driven from here rather than from
+        // ChunkGenerationManager because TabHud reaches LodSendQueue and NetworkHandler, both of
+        // which live in this module and are invisible to common/.
+        ServerTickEvents.END_SERVER_TICK.register(new ServerTickEvents.EndTick() {
+            private int ticks = 0;
+
+            @Override
+            public void onEndTick(net.minecraft.server.MinecraftServer server) {
+                if (++ticks >= 20) {
+                    ticks = 0;
+                    com.ethan.voxyworldgenv2.command.TabHud.tick(server);
+                }
+            }
+        });
 
         ServerChunkEvents.CHUNK_LOAD.register((level, chunk, newlyGenerated) ->
                 ServerEventHandler.onChunkLoad(level, chunk));
