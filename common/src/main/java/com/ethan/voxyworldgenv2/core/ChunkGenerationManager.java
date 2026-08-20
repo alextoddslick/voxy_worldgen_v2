@@ -271,7 +271,7 @@ public final class ChunkGenerationManager {
 
         for (ServerPlayer player : order) {
             UUID uuid = player.getUUID();
-            var synced = PlayerTracker.getInstance().getSyncedChunks(uuid);
+            var synced = PlayerTracker.getInstance().getSyncedChunks(uuid, player.level().dimension());
             if (synced == null) continue;
 
             DimensionState ds = getOrSetupState((ServerLevel) player.level());
@@ -290,15 +290,18 @@ public final class ChunkGenerationManager {
 
             final List<ChunkPos> finalBatch = syncBatch;
             final ServerLevel level = ds.level;
+            // The synced set is keyed by dimension, so the lambda must resolve it against the
+            // dimension the batch was built for, not wherever the player happens to be on arrival.
+            final var dimKey = level.dimension();
             server.execute(() -> {
                 ServerPlayer p = server.getPlayerList().getPlayer(uuid);
                 if (p == null) {
                     // player gone, drop the marks so a rejoin re-syncs
-                    var s = PlayerTracker.getInstance().getSyncedChunks(uuid);
+                    var s = PlayerTracker.getInstance().getSyncedChunks(uuid, dimKey);
                     if (s != null) for (ChunkPos pos : finalBatch) s.remove(Services.CHUNK_POS.packPos(pos));
                     return;
                 }
-                var s = PlayerTracker.getInstance().getSyncedChunks(uuid);
+                var s = PlayerTracker.getInstance().getSyncedChunks(uuid, dimKey);
                 for (ChunkPos pos : finalBatch) {
                     LevelChunk c = level.getChunkSource().getChunk(Services.CHUNK_POS.x(pos), Services.CHUNK_POS.z(pos), false);
                     if (c != null) {
@@ -566,7 +569,7 @@ public final class ChunkGenerationManager {
         long marginSq = marginChunks * marginChunks;
 
         for (ServerPlayer player : players) {
-            var synced = PlayerTracker.getInstance().getSyncedChunks(player.getUUID());
+            var synced = PlayerTracker.getInstance().getSyncedChunks(player.getUUID(), player.level().dimension());
             if (synced == null) continue;
             ChunkPos center = player.chunkPosition();
 

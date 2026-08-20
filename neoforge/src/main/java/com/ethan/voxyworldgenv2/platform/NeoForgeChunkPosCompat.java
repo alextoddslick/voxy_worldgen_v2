@@ -45,6 +45,11 @@ public final class NeoForgeChunkPosCompat implements ChunkPosCompat {
     }
 
     @Override
+    public String dimensionId(net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension) {
+        return dimension.location().toString();
+    }
+
+    @Override
     public void addForcedTicket(ServerChunkCache cache, ChunkPos pos) {
         // forced tickets carry the chunkpos as their value here
         cache.addRegionTicket(TicketType.FORCED, pos, 0, pos);

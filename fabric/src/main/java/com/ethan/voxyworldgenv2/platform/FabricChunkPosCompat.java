@@ -44,6 +44,11 @@ public final class FabricChunkPosCompat implements ChunkPosCompat {
     }
 
     @Override
+    public String dimensionId(net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension) {
+        return dimension.identifier().toString();
+    }
+
+    @Override
     public void addForcedTicket(ServerChunkCache cache, ChunkPos pos) {
         cache.addTicketWithRadius(TicketType.FORCED, pos, 0);
     }

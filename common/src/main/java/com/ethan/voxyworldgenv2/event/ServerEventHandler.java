@@ -50,7 +50,7 @@ public final class ServerEventHandler {
         // offer it to each player, skipping ones who already have it
         long packed = Services.CHUNK_POS.packPos(chunk.getPos());
         for (ServerPlayer player : PlayerTracker.getInstance().getPlayers()) {
-            if (PlayerTracker.getInstance().isSynced(player.getUUID(), packed)) continue;
+            if (PlayerTracker.getInstance().isSynced(player.getUUID(), chunk.getLevel().dimension(), packed)) continue;
             Services.NETWORK.sendLODData(player, chunk);
         }
     }

@@ -33,6 +33,7 @@ public class NetworkHandler {
     public static final Identifier LOD_DATA_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":lod_data");
     public static final Identifier SERVER_CONFIG_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":server_config");
     public static final Identifier SERVER_CONFIG_PUSH_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":server_config_push");
+    public static final Identifier KNOWN_CHUNKS_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":known_chunks");
 
     /**
      * The merged Fabric wire format: unified's config push plus the fork's compressed LOD, known
@@ -291,6 +292,85 @@ public class NetworkHandler {
         }
     }
 
+    /** Client -> server: region bitmasks of what Voxy already holds, so the server can skip them. */
+    public record KnownChunksPayload(ResourceKey<Level> dimension, boolean last, byte[] body) implements CustomPacketPayload {
+        public static final Type<KnownChunksPayload> TYPE = new Type<>(KNOWN_CHUNKS_ID);
+        public static final StreamCodec<FriendlyByteBuf, KnownChunksPayload> CODEC =
+            CustomPacketPayload.codec(KnownChunksPayload::write, KnownChunksPayload::new);
+
+        public KnownChunksPayload(FriendlyByteBuf buf) {
+            this(
+                ResourceKey.create(Registries.DIMENSION, Identifier.parse(buf.readUtf())),
+                buf.readBoolean(),
+                buf.readByteArray(MAX_PACKET_BYTES)
+            );
+        }
+
+        public void write(FriendlyByteBuf buf) {
+            buf.writeUtf(dimension.identifier().toString());
+            buf.writeBoolean(last);
+            buf.writeByteArray(body);
+        }
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
+    /**
+     * Seeds a player's synced set from what their client says Voxy already holds.
+     *
+     * <p>Applied on the handler thread rather than off-thread: packets must be merged in arrival
+     * order, and the cost is bounded -- a 64-chunk radius is ~16k inserts (sub-millisecond).
+     */
+    private static void receiveKnownChunks(ServerPlayer player, KnownChunksPayload payload) {
+        if (!Config.DATA.rememberSentChunks) return;
+
+        var tracker = PlayerTracker.getInstance();
+        var store = tracker.getStore(player.getUUID());
+        if (store == null) return;
+
+        // Budget first, and keyed on where the player actually is rather than on anything the
+        // payload claims: a rejected packet must still cost the sender its allowance, or a client
+        // spraying payloads this method refuses would drive the logging below at packet rate.
+        String dim = PlayerTracker.dimensionId(player.level().dimension());
+        if (!tracker.acceptKnownChunksPacket(player.getUUID(), dim)) return;
+
+        // A known set for a dimension the player is not in cannot be verified against anything and
+        // is not something an honest client sends: it uploads on entering a dimension, by which
+        // point the server has already moved it. Rejecting costs at most one re-send.
+        if (!player.level().dimension().equals(payload.dimension())) {
+            VoxyWorldGenV2.LOGGER.warn("ignoring known-chunks batch from {} for {} while they are in {}",
+                player.getName().getString(), payload.dimension().identifier(),
+                player.level().dimension().identifier());
+            return;
+        }
+
+        long startedNs = System.nanoTime();
+        int added;
+        try {
+            added = store.applyRegions(dim, com.ethan.voxyworldgenv2.network.RegionBitmask.decode(payload.body()));
+        } catch (Exception e) {
+            VoxyWorldGenV2.LOGGER.warn("discarding malformed known-chunks batch from {}: {}",
+                player.getName().getString(), e.toString());
+            return;
+        }
+
+        long millis = (System.nanoTime() - startedNs) / 1_000_000L;
+        if (millis > 50) {
+            VoxyWorldGenV2.LOGGER.warn("applying known chunks for {} took {}ms ({} chunks)",
+                player.getName().getString(), millis, added);
+        }
+
+        if (payload.last()) {
+            tracker.finishKnownChunksUpload(player.getUUID(), dim);
+            tracker.clearGate(player.getUUID(), dim);
+            VoxyWorldGenV2.LOGGER.info("{} reports {} known chunks in {}; skipping re-send",
+                player.getName().getString(), store.size(dim), dim);
+        }
+    }
+
     // one sync radius shared by the broadcast, catch-up and chunk-load paths. Derived from the
     // configured generationRadius rather than a fixed constant, so tuning the radius moves the
     // set of players who receive a chunk with it.
@@ -325,6 +405,10 @@ public class NetworkHandler {
         PayloadTypeRegistry.clientboundPlay().register(ServerConfigPayload.TYPE, ServerConfigPayload.CODEC);
         PayloadTypeRegistry.serverboundPlay().register(HandshakeAckPayload.TYPE, HandshakeAckPayload.CODEC);
         PayloadTypeRegistry.serverboundPlay().register(ServerConfigPushPayload.TYPE, ServerConfigPushPayload.CODEC);
+        PayloadTypeRegistry.serverboundPlay().register(KnownChunksPayload.TYPE, KnownChunksPayload.CODEC);
+
+        ServerPlayNetworking.registerGlobalReceiver(KnownChunksPayload.TYPE,
+            (payload, context) -> context.server().execute(() -> receiveKnownChunks(context.player(), payload)));
 
         ServerPlayNetworking.registerGlobalReceiver(HandshakeAckPayload.TYPE, (payload, context) -> {
             ServerPlayer player = context.player();
@@ -375,7 +459,7 @@ public class NetworkHandler {
     }
 
     private static void setSyncedState(ServerPlayer player, ChunkPos pos, boolean isSynced) {
-        var synced = PlayerTracker.getInstance().getSyncedChunks(player.getUUID());
+        var synced = PlayerTracker.getInstance().getSyncedChunks(player.getUUID(), player.level().dimension());
         if (synced != null) {
             if (isSynced) {
                 synced.add(pos.pack());
@@ -447,8 +531,12 @@ public class NetworkHandler {
     }
 
     private static void sendAsync(ResourceKey<Level> dim, ChunkPos pos, int minY, List<LodSendQueue.PendingSection> sections, List<ServerPlayer> recipients) {
+        String dimId = PlayerTracker.dimensionId(dim);
         for (ServerPlayer player : recipients) {
             if (player.hasDisconnected()) continue;
+            // Hold off while this player's known-chunk upload is still in flight; the gate expires
+            // open, so a vanilla client that never uploads is served exactly as it was before.
+            if (PlayerTracker.getInstance().isGated(player.getUUID(), dimId)) continue;
             if (!stillRelevant(player, dim, pos)) continue;
             // A refused enqueue means the sender is saturated. Leave the chunk unsynced so the
             // catch-up path retries it rather than silently losing it.
