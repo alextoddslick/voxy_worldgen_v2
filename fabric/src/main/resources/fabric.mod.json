@@ -23,6 +23,9 @@
     ],
     "modmenu": [
       "com.ethan.voxyworldgenv2.integration.ModMenuIntegration"
+    ],
+    "sodium:config_api_user": [
+      "com.ethan.voxyworldgenv2.integration.SodiumIntegration"
     ]
   },
   "depends": {
