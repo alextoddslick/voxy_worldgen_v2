@@ -321,7 +321,11 @@ public final class ChunkGenerationManager {
                 }
                 var s = PlayerTracker.getInstance().getSyncedChunks(uuid, dimKey);
                 for (ChunkPos pos : finalBatch) {
-                    LevelChunk c = level.getChunkSource().getChunk(Services.CHUNK_POS.x(pos), Services.CHUNK_POS.z(pos), false);
+                    // getChunkNow, not getChunk(x, z, false): the false only skips adding a ticket,
+                    // the call still managedBlocks on the chunk's FULL future, and under a parallel
+                    // chunk system a holder can sit at FULL ticket level with a future nothing will
+                    // ever drive. The main thread then parks until the 60s watchdog kills the server.
+                    LevelChunk c = level.getChunkSource().getChunkNow(Services.CHUNK_POS.x(pos), Services.CHUNK_POS.z(pos));
                     if (c != null) {
                         // sendLODData rechecks range and sets the synced flag
                         Services.NETWORK.sendLODData(p, c);
@@ -490,9 +494,14 @@ public final class ChunkGenerationManager {
                 ServerChunkCache cache = finalState.level.getChunkSource();
                 List<ChunkPos> actuallyGenerate = new ArrayList<>();
                 for (ChunkPos pos : readyToGenerate) {
-                    if (finalState.level.hasChunk(Services.CHUNK_POS.x(pos), Services.CHUNK_POS.z(pos))) {
-                        LevelChunk existingChunk = finalState.level.getChunk(Services.CHUNK_POS.x(pos), Services.CHUNK_POS.z(pos));
-                        if (existingChunk != null && !existingChunk.isEmpty()) {
+                    // getChunkNow only: hasChunk + getChunk could park the main thread between the
+                    // two calls, and the 2-arg getChunk defaults to ChunkStatus.FULL with load=true,
+                    // which blocks on the chunk's future. A resident chunk is served here; anything
+                    // not resident -- including one that exists on disk but is unloaded -- falls
+                    // through to the generation path, which loads it off-thread.
+                    LevelChunk existingChunk = cache.getChunkNow(Services.CHUNK_POS.x(pos), Services.CHUNK_POS.z(pos));
+                    if (existingChunk != null) {
+                        if (!existingChunk.isEmpty()) {
                             VoxyIntegration.ingestChunk(existingChunk);
                             Services.NETWORK.broadcastLODData(existingChunk);
                         }

@@ -99,7 +99,8 @@ public class ChunkUpdateTracker {
                 sectionYs = new IntOpenHashSet(src);
             }
 
-            LevelChunk chunk = level.getChunkSource().getChunk(Services.CHUNK_POS.x(pos), Services.CHUNK_POS.z(pos), false);
+            // getChunkNow: this runs from tick() on the main thread for every active dimension.
+            LevelChunk chunk = level.getChunkSource().getChunkNow(Services.CHUNK_POS.x(pos), Services.CHUNK_POS.z(pos));
             if (chunk != null) {
                 Services.NETWORK.broadcastLODData(chunk, sectionYs);
                 processed++;
