@@ -71,12 +71,25 @@ Verify with `grep -rn "net.fabricmc" common/src/main/java/` — it must return n
 |---|---|---|
 | 1 | Foundation — test harness, Config merge, pure-JVM classes | **done** |
 | 2 | Network reconciliation — merge the two NetworkHandlers, protocol 5, LodSendQueue | **done** |
-| 3 | Commands and client GUI — `command/`, settings screen, tab HUD, LodMemory | not started |
-| 4 | Spawn pre-generation | not started |
-| 5 | Deployment to `xps@192.168.1.23` | not started |
+| 3 | Commands and client GUI — `command/`, settings screen, tab HUD, LodMemory | **done** |
+| 4 | Spawn pre-generation | **done** |
+| 5 | Deployment to `xps@192.168.1.23` | **done — live** |
 
 Plan 1: `docs/superpowers/plans/2026-08-19-plan1-foundation.md`
 Plan 2: `docs/superpowers/plans/2026-08-19-plan2-network-reconciliation.md`
+Plans 4 & 5: `docs/superpowers/plans/2026-08-19-plan4-5-spawn-pregen-and-deploy.md`
+
+## State: all five plans complete
+
+`:fabric:test` runs **14 classes / 78 tests, all green**. The server is **live** at
+`xps@192.168.1.23:25565` and pre-generating around spawn with nobody connected.
+
+**The one thing nobody has verified: no client has connected yet.** The protocol-5 handshake, the
+join gate, `LodMemory`'s upload, the settings screen and the tab HUD are all unexercised end to end.
+The modpack jar was replaced with the same 2.4.3 build, so both sides speak protocol 5 by
+construction, but that is an argument, not a test.
+
+Deployment details, tuning and the 26.x world layout: see the plans 4 & 5 record.
 
 ## State after plan 2
 
