@@ -16,7 +16,7 @@
     "DebugScreenEntryListMixin",
     "GuiTabListMixin",
     "PlayerTabOverlayAccessor",
-    "VideoSettingsScreenMixin"
+    "OptionsSubScreenMixin"
   ],
   "injectors": {
     "defaultRequire": 1
