@@ -15,7 +15,8 @@
     "DebugScreenEntriesMixin",
     "DebugScreenEntryListMixin",
     "GuiTabListMixin",
-    "PlayerTabOverlayAccessor"
+    "PlayerTabOverlayAccessor",
+    "VideoSettingsScreenMixin"
   ],
   "injectors": {
     "defaultRequire": 1

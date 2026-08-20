@@ -28,6 +28,8 @@ public final class DebugRenderer implements DebugScreenEntry {
 
     @Override
     public void display(DebugScreenDisplayer displayer, Level level, LevelChunk chunk, LevelChunk chunk2) {
+        // Honour the toggle now surfaced in Video Settings; it was previously inert.
+        if (!com.ethan.voxyworldgenv2.core.Config.DATA.showF3MenuStats) return;
         if (level == null) return;
         Minecraft mc = Minecraft.getInstance();
         ChunkGenerationManager manager = ChunkGenerationManager.getInstance();

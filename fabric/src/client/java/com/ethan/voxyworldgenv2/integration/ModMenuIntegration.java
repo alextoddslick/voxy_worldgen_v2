@@ -31,14 +31,8 @@ public class ModMenuIntegration implements ModMenuApi {
                 // client values save locally regardless
                 Config.save();
 
-                boolean remote = isOnRemoteServer();
-                if (!remote) {
-                    Config.applyServerConfig(edits.snapshot());
-                    Config.save();
-                    com.ethan.voxyworldgenv2.core.ChunkGenerationManager.getInstance().scheduleConfigReload();
-                } else if (ServerConfigState.canEdit()) {
-                    ClientPlayNetworking.send(new NetworkHandler.ServerConfigPushPayload(edits.snapshot()));
-                }
+                // One decision, two front-ends: the Video Settings rows go through the same gate.
+                com.ethan.voxyworldgenv2.network.ServerConfigGate.apply(edits.snapshot(), isOnRemoteServer());
             });
 
             return builder.build();
