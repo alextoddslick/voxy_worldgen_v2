@@ -141,6 +141,7 @@ public class NetworkClientHandler {
     @SuppressWarnings("unchecked")
     private static void processLODData(ClientLevel level, NetworkHandler.LODDataPayload payload,
                                        List<NetworkHandler.LODDataPayload.SectionData> sections) {
+        boolean allIngested = true;
         // drop data from another dimension or it renders in the wrong world
         if (!level.dimension().equals(payload.dimension())) return;
 
@@ -166,14 +167,26 @@ public class NetworkClientHandler {
                 DataLayer bl = sectionData.blockLight() != null ? new DataLayer(sectionData.blockLight()) : null;
                 DataLayer sl = sectionData.skyLight() != null ? new DataLayer(sectionData.skyLight()) : null;
 
-                VoxyIntegration.rawIngest(level, section, payload.pos().x(), sectionData.y(), payload.pos().z(), bl, sl);
+                // &= not |=: the chunk counts as remembered only if EVERY section landed. Recording
+                // a partial ingest tells the server to skip a chunk Voxy only partly has, and the
+                // hole it leaves is never re-sent.
+                allIngested &= VoxyIntegration.rawIngest(
+                    level, section, payload.pos().x(), sectionData.y(), payload.pos().z(), bl, sl);
 
             } catch (Exception e) {
+                allIngested = false;
                 VoxyWorldGenV2.LOGGER.error("failed to handle LOD data for chunk " + payload.pos(), e);
             } finally {
                 statesRaw.release();
                 biomesRaw.release();
             }
+        }
+
+        // Remember it only if Voxy actually took every section. The server uses this to skip
+        // re-sending, so an optimistic record is a permanent hole.
+        if (allIngested) {
+            com.ethan.voxyworldgenv2.client.LodMemory.record(
+                payload.dimension(), payload.pos().x(), payload.pos().z());
         }
     }
 }

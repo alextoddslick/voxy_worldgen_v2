@@ -699,11 +699,27 @@ public class NetworkHandler {
     private static void sendAsync(ResourceKey<Level> dim, ChunkPos pos, int minY, List<LodSendQueue.PendingSection> sections, List<ServerPlayer> recipients) {
         String dimId = PlayerTracker.dimensionId(dim);
         for (ServerPlayer player : recipients) {
-            if (player.hasDisconnected()) continue;
+            // EVERY path that does not send must un-mark. Callers mark the chunk synced BEFORE
+            // reaching here (sendLODData, broadcastLODData, and runCatchup pre-marks whole batches),
+            // so a bare `continue` leaves it recorded as delivered forever: collectCompletedInRange
+            // skips anything already in the synced set, so the chunk is never offered again for the
+            // rest of the session. That is a permanent hole in the terrain, not a delayed one.
+            if (player.hasDisconnected()) {
+                setSyncedState(player, pos, false);
+                continue;
+            }
             // Hold off while this player's known-chunk upload is still in flight; the gate expires
             // open, so a vanilla client that never uploads is served exactly as it was before.
-            if (PlayerTracker.getInstance().isGated(player.getUUID(), dimId)) continue;
-            if (!stillRelevant(player, dim, pos)) continue;
+            if (PlayerTracker.getInstance().isGated(player.getUUID(), dimId)) {
+                setSyncedState(player, pos, false);
+                continue;
+            }
+            // Out of range for now. It will come back into range as the player moves, but only if
+            // catch-up can still see it as unsynced.
+            if (!stillRelevant(player, dim, pos)) {
+                setSyncedState(player, pos, false);
+                continue;
+            }
             // A refused enqueue means the sender is saturated. Leave the chunk unsynced so the
             // catch-up path retries it rather than silently losing it.
             if (!LodSendQueue.getInstance().enqueue(player, dim, pos, minY, sections)) {

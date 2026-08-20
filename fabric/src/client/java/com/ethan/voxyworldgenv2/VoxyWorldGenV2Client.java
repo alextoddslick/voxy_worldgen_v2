@@ -28,11 +28,16 @@ public class VoxyWorldGenV2Client implements ClientModInitializer {
             // server config -- and a stale canEdit=true -- survived into the next session: a client
             // that was an operator on one server showed editable controls on the next until restart.
             com.ethan.voxyworldgenv2.network.ServerConfigGate.onDisconnect();
+            com.ethan.voxyworldgenv2.client.LodMemory.onDisconnect();
         });
 
         net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(client -> {
             com.ethan.voxyworldgenv2.network.NetworkClientHandler.drainIngestQueue();
             com.ethan.voxyworldgenv2.network.NetworkState.tick();
+            // Drives the known-chunks upload. Without it the upload never happens, so the server's
+            // join gate never lifts early and only times out -- and every chunk sendAsync touches
+            // during that window used to be marked delivered and dropped.
+            com.ethan.voxyworldgenv2.client.LodMemory.tick(client);
         });
     }
 }

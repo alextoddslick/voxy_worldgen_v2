@@ -47,10 +47,27 @@ public final class ServerEventHandler {
         // fires for every vanilla chunk load, so skip the loop when nobody is online
         if (PlayerTracker.getInstance().getPlayerCount() == 0) return;
 
-        // offer it to each player, skipping ones who already have it
+        // Gated on rememberSentChunks: this is the feature's rollback switch, and a rollback that
+        // only partly rolls back is worse than none. With it off, skip the store consultation
+        // entirely and send to every nearby player on every load.
+        boolean skipKnown = com.ethan.voxyworldgenv2.core.Config.DATA.rememberSentChunks;
+        String dim = skipKnown ? PlayerTracker.dimensionId(level.dimension()) : null;
         long packed = Services.CHUNK_POS.packPos(chunk.getPos());
+
         for (ServerPlayer player : PlayerTracker.getInstance().getPlayers()) {
-            if (PlayerTracker.getInstance().isSynced(player.getUUID(), chunk.getLevel().dimension(), packed)) continue;
+            if (player.level() != level) continue;
+            if (skipKnown) {
+                var store = PlayerTracker.getInstance().getStore(player.getUUID());
+                if (store != null && store.isSynced(dim, packed)) {
+                    // "Claimed" is not "delivered". markDeferred records a chunk that was marked
+                    // synced but whose send never happened; without consulting it here that write
+                    // is dead and the chunk is lost for the session.
+                    if (!store.isDeferred(dim, packed)) continue;
+                    // Send it now and drop the deferral, so this recovery happens once rather than
+                    // on every subsequent load.
+                    store.clearDeferred(dim, packed);
+                }
+            }
             Services.NETWORK.sendLODData(player, chunk);
         }
     }
