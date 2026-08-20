@@ -6,6 +6,7 @@ import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerChunkEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 
 
@@ -24,6 +25,11 @@ public class VoxyWorldGenV2Fabric implements ModInitializer {
                 ServerEventHandler.onPlayerJoin(handler.getPlayer()));
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) ->
                 ServerEventHandler.onPlayerDisconnect(handler.getPlayer()));
+
+        // fabric-command-api-v2 ships inside the fabric-api artifact already on the classpath.
+        // The second parameter is a CommandBuildContext, not a RegistryAccess.
+        CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
+                com.ethan.voxyworldgenv2.command.VoxyGenCommand.register(dispatcher));
 
         ServerTickEvents.END_SERVER_TICK.register(ServerEventHandler::onServerTick);
 

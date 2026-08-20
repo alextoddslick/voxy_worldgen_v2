@@ -65,6 +65,7 @@ public final class ChunkGenerationManager {
     // stale and not touch this session's throttle or counters
     private final AtomicInteger sessionId = new AtomicInteger(0);
     private final GenerationStats stats = new GenerationStats();
+    private volatile long generationPausedUntilMs = 0L;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean configReloadScheduled = new AtomicBoolean(false);
 
@@ -111,6 +112,15 @@ public final class ChunkGenerationManager {
             state.tellusActive = TellusIntegration.isTellusWorld(level);
             return state;
         });
+    }
+
+    /**
+     * Whether this is an integrated server. The send queue uses it to pick the singleplayer
+     * True while generation is deliberately paused after a dimension change, so the destination's
+     * spawn area can load without the worker grinding the old dimension alongside it.
+     */
+    public boolean isTransitionPaused() {
+        return System.currentTimeMillis() < generationPausedUntilMs;
     }
 
     /**

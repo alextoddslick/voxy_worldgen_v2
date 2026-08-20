@@ -13,7 +13,9 @@
   ],
   "client": [
     "DebugScreenEntriesMixin",
-    "DebugScreenEntryListMixin"
+    "DebugScreenEntryListMixin",
+    "GuiTabListMixin",
+    "PlayerTabOverlayAccessor"
   ],
   "injectors": {
     "defaultRequire": 1

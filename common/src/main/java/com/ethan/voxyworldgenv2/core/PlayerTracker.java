@@ -44,6 +44,9 @@ public class PlayerTracker {
      */
     private final Map<UUID, Map<String, Integer>> knownChunksBudget = new ConcurrentHashMap<>();
 
+    /** Per-player, per-dimension radius for /voxygen refresh near. */
+    private final Map<UUID, Map<String, Integer>> refreshRadius = new ConcurrentHashMap<>();
+
     private static final int MAX_KNOWN_CHUNKS_PACKETS = 32;
     private static final int UPLOAD_FINISHED = -1;
 
@@ -79,6 +82,7 @@ public class PlayerTracker {
         lastDimension.remove(id);
         awaitingKnownSet.remove(id);
         knownChunksBudget.remove(id);
+        refreshRadius.remove(id);
     }
 
     public void clear() {
@@ -90,6 +94,7 @@ public class PlayerTracker {
         lastDimension.clear();
         awaitingKnownSet.clear();
         knownChunksBudget.clear();
+        refreshRadius.clear();
     }
 
     /**
@@ -169,6 +174,22 @@ public class PlayerTracker {
 
     public void clearBackfill(UUID uuid) {
         needsBackfill.remove(uuid);
+    }
+
+    public void setRefreshRadius(UUID uuid, String dimensionId, int radius) {
+        refreshRadius.computeIfAbsent(uuid, k -> new ConcurrentHashMap<>()).put(dimensionId, radius);
+    }
+
+    public int getRefreshRadius(UUID uuid, String dimensionId) {
+        Map<String, Integer> byDim = refreshRadius.get(uuid);
+        if (byDim == null) return 0;
+        Integer r = byDim.get(dimensionId);
+        return r == null ? 0 : r;
+    }
+
+    public void clearRefreshRadius(UUID uuid, String dimensionId) {
+        Map<String, Integer> byDim = refreshRadius.get(uuid);
+        if (byDim != null) byDim.remove(dimensionId);
     }
 
     public void armGate(UUID uuid, String dimensionId) {
