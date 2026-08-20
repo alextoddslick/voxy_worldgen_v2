@@ -37,6 +37,17 @@ public class SodiumIntegration implements ConfigEntryPoint {
     public void registerConfigLate(ConfigBuilder builder) {
         com.ethan.voxyworldgenv2.VoxyWorldGenV2.LOGGER.info(
             "[voxy-settings] Sodium config API reached: registering 7 options into Sodium's video settings");
+        try {
+            buildPage(builder);
+        } catch (Throwable t) {
+            // Sodium swallows whatever escapes an entrypoint, which turns a builder mistake into
+            // "the page silently does not exist". Log it here or it is invisible.
+            com.ethan.voxyworldgenv2.VoxyWorldGenV2.LOGGER.error(
+                "[voxy-settings] FAILED building the Sodium page", t);
+        }
+    }
+
+    private void buildPage(ConfigBuilder builder) {
         OptionGroupBuilder display = builder.createOptionGroup()
             .setName(Component.translatable("config.voxyworldgenv2.category.client"))
             .addOption(builder.createBooleanOption(id("f3_stats"))
