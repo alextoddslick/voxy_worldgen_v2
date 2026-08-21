@@ -232,7 +232,7 @@ public final class VoxyGenCommand {
         // uses -- rather than a literal. A hardcoded "(MC x.y.z)" here silently lies after a port
         // to a different MC version; VoxyWorldGenV2.modVersion() carries the target MC version in
         // its own "+mc<version>" suffix, stamped from gradle.properties at build time, so it can't.
-        reply(ctx, "§6Voxy World Gen V2§r  (v" + VoxyWorldGenV2.modVersion() + ")");
+        reply(ctx, "§6Voxy World Gen V2§r  v" + VoxyWorldGenV2.modVersion());
         reply(ctx, String.format("  generation: %s   players tracked: %d",
             Config.DATA.enabled ? "§aon§r" : "§coff§r", PlayerTracker.getInstance().getPlayerCount()));
         reply(ctx, String.format("  chunks: §a%d§r done, §e%d§r queued, §c%d§r failed, %d skipped",
