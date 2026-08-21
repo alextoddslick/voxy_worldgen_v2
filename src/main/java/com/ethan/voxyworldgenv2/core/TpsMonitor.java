@@ -8,10 +8,13 @@ public class TpsMonitor {
     private int tickTimeIndex = 0;
     private long lastTickNanos = 0;
     private final AtomicBoolean throttled = new AtomicBoolean(false);
-    
-    // standard for high performance: 18 tps (55.5ms)
-    // aggressively pause if server truly struggles
-    private static final double MSPT_THRESHOLD = 1000.0 / 18.0;
+    private volatile double loadFactor = 1.0;
+
+    // Ease off below ~22 tps and stop by ~13 tps, scaling in between. Starting earlier than the
+    // old fixed 18-tps/55.5ms cutoff means the worker backs off before the tick is already
+    // buried, not after, and a mild dip no longer snaps straight from full speed to a dead stop.
+    private static final double MSPT_SOFT = 1000.0 / 22.0;
+    private static final double MSPT_HARD = 75.0;
 
     public void tick() {
         long now = System.nanoTime();
@@ -32,16 +35,16 @@ public class TpsMonitor {
             }
         }
 
-        float mspt = 0.0f;
-        if (count > 0) {
-            mspt = (float) (totalTickTime / count) / 1_000_000.0f;
-        }
+        double mspt = count > 0 ? (totalTickTime / (double) count) / 1_000_000.0 : 0.0;
 
-        if (mspt > MSPT_THRESHOLD) {
-            throttled.set(true);
+        if (mspt <= MSPT_SOFT) {
+            loadFactor = 1.0;
+        } else if (mspt >= MSPT_HARD) {
+            loadFactor = 0.0;
         } else {
-            throttled.set(false);
+            loadFactor = 1.0 - (mspt - MSPT_SOFT) / (MSPT_HARD - MSPT_SOFT);
         }
+        throttled.set(loadFactor <= 0.0);
     }
 
     public void reset() {
@@ -49,9 +52,16 @@ public class TpsMonitor {
         tickTimeIndex = 0;
         Arrays.fill(recentTickTimes, 0);
         throttled.set(false);
+        loadFactor = 1.0;
     }
 
+    /** True only at the hard floor (~13 tps); the worker fully pauses dispatch on this. */
     public boolean isThrottled() {
         return throttled.get();
+    }
+
+    /** 1.0 healthy down to 0.0 overloaded; scales how much generation work to dispatch. */
+    public double loadFactor() {
+        return loadFactor;
     }
 }

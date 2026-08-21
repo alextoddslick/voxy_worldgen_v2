@@ -19,7 +19,7 @@ public abstract class BlockUpdateMixin {
         
         LevelChunk chunk = self.getChunkAt(pos);
         if (chunk != null) {
-            ChunkUpdateTracker.getInstance().markDirty(chunk);
+            ChunkUpdateTracker.getInstance().markDirty(chunk, pos.getY());
         }
     }
 }
