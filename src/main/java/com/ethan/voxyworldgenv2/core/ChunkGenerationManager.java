@@ -272,14 +272,23 @@ public final class ChunkGenerationManager {
                                     .invokeGetChunkFutureMainThread(pos.x(), pos.z(), ChunkStatus.FULL, true)
                                     .whenCompleteAsync((result, throwable) -> {
                                         ServerPlayer target = server.getPlayerList().getPlayer(playerUUID);
+                                        // Track whether the send ACTUALLY happened. Attaching the
+                                        // else-if to the outer load-success condition let a successful
+                                        // load whose send was skipped -- player left mid-load, or an
+                                        // empty chunk -- fall through both branches: not sent, not
+                                        // deferred, still claimed from the pre-mark above. That chunk
+                                        // was then lost for the rest of the session.
+                                        boolean sent = false;
                                         if (throwable == null && result != null && result.isSuccess()
                                                 && result.orElse(null) instanceof LevelChunk chunk) {
                                             if (target != null && !chunk.isEmpty()) {
                                                 com.ethan.voxyworldgenv2.network.NetworkHandler.sendLODData(target, chunk);
+                                                sent = true;
                                             }
-                                        } else if (store != null && Config.DATA.rememberSentChunks) {
-                                            // Load failed and the batch was already pre-marked synced,
-                                            // so without this the chunk is claimed and never arrives.
+                                        }
+                                        if (!sent && store != null && Config.DATA.rememberSentChunks) {
+                                            // Claimed but not delivered; onChunkLoad re-sends it on
+                                            // the next load.
                                             store.markDeferred(dimId, pos.pack());
                                         }
                                         // Release the ticket only; this chunk was never a generation
