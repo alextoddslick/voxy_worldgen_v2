@@ -21,6 +21,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.permissions.Permission;
 import net.minecraft.server.permissions.PermissionLevel;
+import net.fabricmc.loader.api.FabricLoader;
 
 /**
  * Server-side operator commands.
@@ -89,6 +90,18 @@ public final class VoxyGenCommand {
      */
     private static int refreshPermissionLevel() {
         return Math.min(4, Math.max(0, Config.DATA.refreshPermissionLevel));
+    }
+
+    /**
+     * Reads the running game's version off FabricLoader's "minecraft" mod container -- the same
+     * source VoxyWorldGenV2.modVersion() already uses for the startup log line -- rather than a
+     * literal. A hardcoded string here would silently lie the next time this branch gets ported to
+     * a newer MC version and nobody remembers to touch this one line.
+     */
+    private static String mcVersion() {
+        return FabricLoader.getInstance().getModContainer("minecraft")
+            .map(c -> c.getMetadata().getVersion().getFriendlyString())
+            .orElse("unknown");
     }
 
     // ---- subtrees -------------------------------------------------------------------------
@@ -227,7 +240,7 @@ public final class VoxyGenCommand {
         var stats = mgr.getStats();
         var q = LodSendQueue.getInstance();
 
-        reply(ctx, "§6Voxy World Gen V2§r  (MC 1.21.11)");
+        reply(ctx, String.format("§6Voxy World Gen V2§r  (MC %s)", mcVersion()));
         reply(ctx, String.format("  generation: %s   players tracked: %d",
             Config.DATA.enabled ? "§aon§r" : "§coff§r", PlayerTracker.getInstance().getPlayerCount()));
         reply(ctx, String.format("  chunks: §a%d§r done, §e%d§r queued, §c%d§r failed, %d skipped",
