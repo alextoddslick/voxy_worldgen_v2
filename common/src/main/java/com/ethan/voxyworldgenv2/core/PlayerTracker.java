@@ -2,6 +2,7 @@ package com.ethan.voxyworldgenv2.core;
 
 import com.ethan.voxyworldgenv2.VoxyWorldGenV2;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.Level;
 
@@ -16,7 +17,17 @@ import it.unimi.dsi.fastutil.longs.LongSet;
 
 public class PlayerTracker {
     private static final PlayerTracker INSTANCE = new PlayerTracker();
-    private final Set<ServerPlayer> players;
+
+    // Keyed by UUID, not by the ServerPlayer object.
+    //
+    // Entity.hashCode() is the entity id, which is not stable across a player's session: respawning
+    // after death (and a dimension change) yields a ServerPlayer carrying a different id. A hash set
+    // keyed on the player object therefore probes the wrong bucket when removing on disconnect, the
+    // entry is never removed, and the generation worker never sees an empty player list -- so it
+    // keeps generating chunks forever for nobody, anchored to a phantom. Measured on a 1.21.1
+    // dedicated server (port/26.2, commit 2bc4971): this tracker reported 1 player while the
+    // server's own player list reported 0, with generation still running.
+    private final Map<UUID, ServerPlayer> players;
 
     /**
      * Per-player synced sets, keyed by dimension inside the store. The flat set this replaced had
@@ -51,7 +62,7 @@ public class PlayerTracker {
     private static final int UPLOAD_FINISHED = -1;
 
     private PlayerTracker() {
-        this.players = ConcurrentHashMap.newKeySet();
+        this.players = new ConcurrentHashMap<>();
         this.syncedChunks = new ConcurrentHashMap<>();
         this.moddedPlayers = ConcurrentHashMap.newKeySet();
         this.needsBackfill = ConcurrentHashMap.newKeySet();
@@ -64,7 +75,7 @@ public class PlayerTracker {
 
     public void addPlayer(ServerPlayer player) {
         UUID id = player.getUUID();
-        players.add(player);
+        players.put(id, player);
         syncedChunks.put(id, new SyncedChunkStore());
         // nothing synced yet so flag for backfill
         needsBackfill.add(id);
@@ -72,9 +83,20 @@ public class PlayerTracker {
         armGate(id, dimensionId(player.level().dimension()));
     }
 
+    /**
+     * Drops a player, but only if the instance disconnecting is the one currently tracked.
+     *
+     * <p>Vanilla's {@code PlayerList.remove} guards the same way. A duplicate login disconnects the
+     * old connection after the new one's JOIN has already fired, and without the guard that late
+     * disconnect would wipe the live session's tracking -- which {@link #reconcile} never repairs,
+     * because it only prunes and refreshes, it never re-adds. A skipped removal here is harmless by
+     * comparison: reconcile drops entries whose player is actually gone within a second.
+     */
     public void removePlayer(ServerPlayer player) {
         UUID id = player.getUUID();
-        players.remove(player);
+        ServerPlayer tracked = players.get(id);
+        if (tracked != null && tracked != player) return;
+        players.remove(id);
         syncedChunks.remove(id);
         moddedPlayers.remove(id);
         clientProtocols.remove(id);
@@ -83,6 +105,47 @@ public class PlayerTracker {
         awaitingKnownSet.remove(id);
         knownChunksBudget.remove(id);
         refreshRadius.remove(id);
+    }
+
+    /**
+     * Reconciles this tracker against the server's authoritative player list.
+     *
+     * <p>Necessary because {@code ServerPlayConnectionEvents.DISCONNECT} is not guaranteed to fire.
+     * Measured on 1.21.1 (port/26.2, commit 2bc4971): a Carpet fake player that died left the game --
+     * {@code PlayerList.remove} ran and "left the game" was logged -- yet the event never fired, so
+     * the entry was never removed and the generation worker never saw an empty player list. It then
+     * generated chunks forever for nobody. No keying scheme fixes that case, because the removal
+     * code never executed at all; the tracker has to reconcile rather than trust the event alone.
+     *
+     * <p>Also refreshes stale references: respawning replaces a player's {@code ServerPlayer}
+     * instance, and the old one is removed from the world. Holding it would mean reading a dead
+     * entity's position and sending packets to a defunct connection.
+     *
+     * @return number of entries dropped
+     */
+    public int reconcile(MinecraftServer server) {
+        if (server == null) return 0;
+        int removed = 0;
+        for (var it = players.entrySet().iterator(); it.hasNext(); ) {
+            var entry = it.next();
+            UUID id = entry.getKey();
+            ServerPlayer live = server.getPlayerList().getPlayer(id);
+            if (live == null || live.hasDisconnected()) {
+                it.remove();
+                syncedChunks.remove(id);
+                moddedPlayers.remove(id);
+                clientProtocols.remove(id);
+                needsBackfill.remove(id);
+                lastDimension.remove(id);
+                awaitingKnownSet.remove(id);
+                knownChunksBudget.remove(id);
+                refreshRadius.remove(id);
+                removed++;
+            } else if (live != entry.getValue()) {
+                entry.setValue(live);
+            }
+        }
+        return removed;
     }
 
     public void clear() {
@@ -115,7 +178,7 @@ public class PlayerTracker {
     }
 
     public Collection<ServerPlayer> getPlayers() {
-        return Collections.unmodifiableCollection(players);
+        return Collections.unmodifiableCollection(players.values());
     }
 
     public SyncedChunkStore getStore(UUID uuid) {
