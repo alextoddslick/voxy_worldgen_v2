@@ -22,6 +22,11 @@ public class NetworkClientHandler {
             context.client().execute(() -> {
                 NetworkState.setServerConnected(serverHasMod);
                 NetworkState.setServerProtocol(protocol);
+                // Only ack a server that registered the payload -- an older server never
+                // registered HandshakeAckPayload, and sending it one can drop the connection.
+                if (NetworkState.supportsHandshakeAck()) {
+                    ClientPlayNetworking.send(new NetworkHandler.HandshakeAckPayload(NetworkHandler.PROTOCOL_VERSION));
+                }
             });
         });
 
@@ -30,6 +35,19 @@ public class NetworkClientHandler {
                 handleLODData(payload);
             });
         });
+
+        // Neither payload drives a client UI on this branch (the fork's settings-screen feature
+        // was not ported here, only the wire format -- see the phase-3 report), but registering a
+        // receiver still matters: Fabric decodes a clientbound payload it has no handler for and
+        // just warns, so this is only a hair cheaper than leaving it unhandled -- it exists so a
+        // future client build has somewhere to actually consume these without a protocol bump.
+        ClientPlayNetworking.registerGlobalReceiver(NetworkHandler.ServerConfigPayload.TYPE,
+            (payload, context) -> context.client().execute(() ->
+                VoxyWorldGenV2.LOGGER.debug("received server config (canEdit={})", payload.canEdit())));
+
+        ClientPlayNetworking.registerGlobalReceiver(NetworkHandler.SettingsSnapshotPayload.TYPE,
+            (payload, context) -> context.client().execute(() ->
+                VoxyWorldGenV2.LOGGER.debug("received settings snapshot (isOp={})", payload.isOp())));
     }
 
     @SuppressWarnings("unchecked")

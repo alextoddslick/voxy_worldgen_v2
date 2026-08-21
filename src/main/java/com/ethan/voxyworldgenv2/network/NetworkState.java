@@ -46,6 +46,20 @@ public class NetworkState {
         return serverConnected && serverProtocol >= 2;
     }
 
+    /** The server registered the storage-report payload, so sending it will not drop the connection. */
+    public static boolean supportsStorageReport() {
+        return serverConnected && serverProtocol >= 3;
+    }
+
+    /**
+     * The server registered handshake-ack, server-config and settings payloads, so replying to the
+     * handshake and requesting the settings snapshot will not drop the connection. All three
+     * arrived together in protocol 5, so one gate covers the set.
+     */
+    public static boolean supportsHandshakeAck() {
+        return serverConnected && serverProtocol >= 5;
+    }
+
     public static void incrementReceived(long bytes) {
         chunksReceived.incrementAndGet();
         bytesReceived.addAndGet(bytes);

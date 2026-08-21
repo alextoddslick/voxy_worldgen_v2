@@ -32,6 +32,12 @@ public class PlayerTracker {
     /** Catch-up radius override while a /voxygen refresh drains. UUID -> dimension id -> chunks. */
     private final Map<UUID, Map<String, Integer>> refreshRadius = new ConcurrentHashMap<>();
 
+    /** The voxy protocol a connected client's HandshakeAckPayload reported, 0 = unknown/none yet. */
+    private final Map<UUID, Integer> clientProtocols = new ConcurrentHashMap<>();
+
+    /** The client's self-reported Voxy disk usage in bytes, -1 = never reported. */
+    private final Map<UUID, Long> clientStoreBytes = new ConcurrentHashMap<>();
+
     /**
      * How many known-chunk packets this player has spent for a dimension since entering it, or
      * {@link #UPLOAD_FINISHED} once their final packet arrived. UUID -> dimension id -> count.
@@ -76,6 +82,8 @@ public class PlayerTracker {
         awaitingKnownSet.remove(id);
         refreshRadius.remove(id);
         knownChunksBudget.remove(id);
+        clientProtocols.remove(id);
+        clientStoreBytes.remove(id);
     }
 
     /**
@@ -96,6 +104,8 @@ public class PlayerTracker {
         awaitingKnownSet.remove(id);
         refreshRadius.remove(id);
         knownChunksBudget.remove(id);
+        clientProtocols.remove(id);
+        clientStoreBytes.remove(id);
     }
 
     public void clear() {
@@ -104,6 +114,8 @@ public class PlayerTracker {
         awaitingKnownSet.clear();
         refreshRadius.clear();
         knownChunksBudget.clear();
+        clientProtocols.clear();
+        clientStoreBytes.clear();
     }
 
     /**
@@ -134,6 +146,8 @@ public class PlayerTracker {
                 awaitingKnownSet.remove(entry.getKey());
                 refreshRadius.remove(entry.getKey());
                 knownChunksBudget.remove(entry.getKey());
+                clientProtocols.remove(entry.getKey());
+                clientStoreBytes.remove(entry.getKey());
                 removed++;
             } else if (live != entry.getValue()) {
                 entry.setValue(live);
@@ -228,6 +242,27 @@ public class PlayerTracker {
             return false;
         }
         return true;
+    }
+
+    /**
+     * Records rather than compares: a mismatch is not a reason to send nothing, since features are
+     * gated on floors and an older client simply is not offered payloads its build cannot parse.
+     */
+    public void setClientProtocol(UUID uuid, int protocol) {
+        clientProtocols.put(uuid, protocol);
+    }
+
+    public int getClientProtocol(UUID uuid) {
+        return clientProtocols.getOrDefault(uuid, 0);
+    }
+
+    /** Purely informational (tab HUD / /voxygen traffic); a lying client only misreports its own line. */
+    public void reportClientStoreBytes(UUID uuid, long bytes) {
+        clientStoreBytes.put(uuid, bytes);
+    }
+
+    public long getClientStoreBytes(UUID uuid) {
+        return clientStoreBytes.getOrDefault(uuid, -1L);
     }
 
     public it.unimi.dsi.fastutil.longs.LongSet getSyncedChunks(
