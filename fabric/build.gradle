@@ -7,6 +7,11 @@ base {
     archivesName = "${rootProject.mod_name}-fabric-${rootProject.fabric_minecraft_version}"
 }
 
+// Each loader module targets a DIFFERENT Minecraft version (fabric 26.2, neoforge 1.21.1), so the
+// "+mc" suffix has to be set per module. Inheriting one value from subprojects{} stamped the
+// NeoForge jar "+mc26.2" -- a jar that lied about its own MC version.
+version = "${rootProject.mod_version}+mc${rootProject.fabric_minecraft_version}"
+
 // Compile the shared game logic from ../common against Fabric's Minecraft, into the main
 // (common-environment) source set. The split client source set holds client-only classes.
 sourceSets.main.java.srcDir "${rootDir}/common/src/main/java"
@@ -55,12 +60,12 @@ dependencies {
 }
 
 processResources {
-    inputs.property "version", rootProject.mod_version
+    inputs.property "version", project.version
     inputs.property "minecraft_version", rootProject.fabric_minecraft_version
     inputs.property "loader_version", rootProject.fabric_loader_version
 
     filesMatching("fabric.mod.json") {
-        expand "version": rootProject.mod_version,
+        expand "version": project.version,
                 "minecraft_version": rootProject.fabric_minecraft_version,
                 "loader_version": rootProject.fabric_loader_version
     }

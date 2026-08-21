@@ -16,7 +16,7 @@ import net.neoforged.neoforge.event.level.ChunkEvent;
 public class VoxyWorldGenV2NeoForge {
 
     public VoxyWorldGenV2NeoForge(IEventBus modEventBus) {
-        VoxyWorldGenV2.LOGGER.info("voxy world gen v2 initializing (neoforge)");
+        VoxyWorldGenV2.LOGGER.info("voxy world gen v2 initializing (neoforge, version {})", VoxyWorldGenV2.modVersion());
         com.ethan.voxyworldgenv2.core.Config.load();
 
         modEventBus.addListener(NetworkHandler::registerPayloads);

@@ -7,6 +7,9 @@ base {
     archivesName = "${rootProject.mod_name}-neoforge-${rootProject.neo_minecraft_version}"
 }
 
+// See the note in fabric/build.gradle: the "+mc" suffix is per module, not inherited.
+version = "${rootProject.mod_version}+mc${rootProject.neo_minecraft_version}"
+
 java {
     toolchain.languageVersion = JavaLanguageVersion.of(21)
     withSourcesJar()
@@ -63,7 +66,7 @@ tasks.named('processResources', ProcessResources).configure {
             mod_id                 : rootProject.mod_id,
             mod_name               : rootProject.mod_name,
             mod_author             : rootProject.mod_author,
-            version                : rootProject.mod_version,
+            version                : project.version,
     ]
     inputs.properties replaceProperties
 

@@ -14,7 +14,7 @@ public class VoxyWorldGenV2Fabric implements ModInitializer {
 
     @Override
     public void onInitialize() {
-        VoxyWorldGenV2.LOGGER.info("voxy world gen v2 initializing (fabric)");
+        VoxyWorldGenV2.LOGGER.info("voxy world gen v2 initializing (fabric, version {})", VoxyWorldGenV2.modVersion());
         com.ethan.voxyworldgenv2.core.Config.load();
         NetworkHandler.init();
 
