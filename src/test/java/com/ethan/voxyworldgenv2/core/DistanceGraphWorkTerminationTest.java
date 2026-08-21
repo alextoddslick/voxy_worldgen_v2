@@ -29,14 +29,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * worker never returned from dispatchGeneration it also never re-read the player list, so it stayed
  * anchored to a player who had since disconnected and ignored two teleports into fresh terrain.
  *
- * <p>This branch's worker loop is structured differently -- it has no separate dispatchBatch /
- * dispatchGeneration split, and its own findWork already hands out the whole 4x4 block rather than
- * a chunk-radius-filtered subset of it -- but the same invariant applies: findWork must terminate,
- * because a batch it can never mark full is a batch it will offer on every call, spinning the
- * worker thread on that one radius forever. These tests drive findWork exactly the way the worker
- * loop does (see ChunkGenerationManager.workerLoop's preFiltered / decrementBatch handling),
- * including the untracking that puts a batch straight back into play, and assert the loop
- * terminates.
+ * <p>This branch's own findWork already hands out the whole 4x4 block rather than a
+ * chunk-radius-filtered subset of it, so the boundary-math cause above never applied here -- but
+ * the same invariant is load-bearing regardless: findWork must terminate, because a batch it can
+ * never mark full is a batch it will offer on every call, spinning the worker thread on that one
+ * radius forever. As of the phase-3 protocol-5/spawn-pregen port, this branch's worker loop DOES
+ * have a dispatchBatch-equivalent split too (ChunkGenerationManager.dispatchChunkBatch, extracted
+ * so dispatchSpawnPregen can share it with the primary per-player path) -- these tests drive
+ * findWork exactly the way that method does (preFiltered / decrementBatch handling), including the
+ * untracking that puts a batch straight back into play, and assert the loop terminates.
  */
 class DistanceGraphWorkTerminationTest {
 
