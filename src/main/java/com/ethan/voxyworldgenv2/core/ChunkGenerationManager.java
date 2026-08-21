@@ -48,6 +48,8 @@ public final class ChunkGenerationManager {
         final Map<Long, AtomicInteger> batchCounters = new ConcurrentHashMap<>();
         final Map<Long, Long> taskStartMs = new ConcurrentHashMap<>();
         final AtomicInteger remainingInRadius = new AtomicInteger(0);
+        // chunks that failed to finish, retry count so we give up instead of looping
+        final Map<Long, Integer> failCounts = new ConcurrentHashMap<>();
         boolean tellusActive = false;
         boolean loaded = false;
 
@@ -55,6 +57,11 @@ public final class ChunkGenerationManager {
             this.level = level;
         }
     }
+
+    // give up on a chunk after this many failed tries, so findWork stops re-offering its batch
+    // forever for a chunk that resolves but never succeeds (distinct from a stuck/hung task,
+    // which reapStuckTasks handles separately)
+    private static final int MAX_CHUNK_RETRIES = 3;
 
     private final Map<ResourceKey<Level>, DimensionState> dimensionStates = new ConcurrentHashMap<>();
     
@@ -95,10 +102,18 @@ public final class ChunkGenerationManager {
     // worker
     private Thread workerThread;
     private final AtomicBoolean workerRunning = new AtomicBoolean(false);
-    
+    // rotated each pass so one player with a big unfilled frontier can't perpetually
+    // starve the others from ever being the one findWork is tried against first
+    private int fairnessCursor = 0;
+
     // c2me compatibility - queue ticket operations to process at safe time
     private record TicketOp(ServerLevel level, ChunkPos pos, boolean add) {}
     private final ConcurrentLinkedQueue<TicketOp> pendingTicketOps = new ConcurrentLinkedQueue<>();
+    // tracks tickets we've actually applied so shutdown can release exactly those. TicketType.FORCED
+    // carries FLAG_PERSIST, so a leaked ticket is written into the world's chunk_tickets SavedData
+    // and reactivated by MinecraftServer.prepareLevels() on the next boot, which then blocks
+    // "Loading initial chunks" until every leaked chunk reaches FULL.
+    private final Map<ServerLevel, LongSet> appliedTickets = new ConcurrentHashMap<>();
 
     private ChunkGenerationManager() {}
     
@@ -139,7 +154,12 @@ public final class ChunkGenerationManager {
         stopWorker();
         com.ethan.voxyworldgenv2.network.LodSendQueue.getInstance().shutdown();
         TellusIntegration.shutdown();
-        
+
+        // Clear our tickets before persisting/clearing state, or a chunk still forced by us at
+        // shutdown -- likely from spawn pregen, which can leave chunks in flight indefinitely
+        // while nobody is online to notice -- hangs the next boot (see appliedTickets above).
+        releaseAllTickets();
+
         for (var entry : dimensionStates.entrySet()) {
             DimensionState state = entry.getValue();
             if (state.loaded) {
@@ -321,7 +341,7 @@ public final class ChunkGenerationManager {
                     continue;
                 }
 
-                if (tpsMonitor.isThrottled() || pauseCheck.getAsBoolean()) {
+                if (pauseCheck.getAsBoolean()) {
                     Thread.sleep(500);
                     continue;
                 }
@@ -329,6 +349,14 @@ public final class ChunkGenerationManager {
                 // Yield entirely while a player is loading into a dimension (join or teleport).
                 if (System.currentTimeMillis() < generationPausedUntilMs) {
                     Thread.sleep(250);
+                    continue;
+                }
+
+                // Ease off gracefully as TPS degrades instead of an all-or-nothing cutoff: scales
+                // how large a batch we dispatch this pass, down to a full stop under heavy load.
+                double load = tpsMonitor.loadFactor();
+                if (load <= 0.0) {
+                    Thread.sleep(500);
                     continue;
                 }
 
@@ -340,16 +368,28 @@ public final class ChunkGenerationManager {
                     Thread.sleep(200);
                     continue;
                 }
-                
-                var players = new ArrayList<>(PlayerTracker.getInstance().getPlayers());
+
+                List<ServerPlayer> players = new ArrayList<>(PlayerTracker.getInstance().getPlayers());
                 if (players.isEmpty()) {
-                    Thread.sleep(1000);
+                    // Nobody online. The chunk system still ticks (ServerChunkCache.tick runs
+                    // unconditionally in ServerLevel.tick), so the only thing stopping progress is
+                    // that every work source above is player-anchored. Fall through to the spawn
+                    // anchor rather than idling -- this is what fills a fresh or unattended
+                    // server's spawn area even before anyone has ever joined.
+                    int idleBudget = Math.max(1, (int) Math.ceil(Config.getMaxActiveTasks(isSingleplayer()) * load / 2.0));
+                    Thread.sleep(dispatchSpawnPregen(idleBudget) ? 50 : 1000);
                     continue;
                 }
-                
+
+                // Rotate which player findWork is tried against first each pass, so one player
+                // with a large unfilled frontier can't perpetually starve the others from ever
+                // being offered a batch of their own.
+                fairnessCursor = (fairnessCursor + 1) % players.size();
+                players = rotated(players, fairnessCursor);
+
                 List<ChunkPos> batch = null;
                 DimensionState activeState = null;
-                
+
                 // try to find work around any player in their respective dimension
                 for (ServerPlayer player : players) {
                     DimensionState ds = getOrSetupState((ServerLevel) player.level());
@@ -361,7 +401,7 @@ public final class ChunkGenerationManager {
                         break;
                     }
                 }
-                
+
                 // Catch-up sync runs EVERY iteration, not only when generation is idle: on a
                 // server whose near area was already generated by normal play, findWork only
                 // finds frontier chunks far away, so gating this behind batch == null starved
@@ -376,119 +416,9 @@ public final class ChunkGenerationManager {
                     Thread.sleep(100);
                     continue;
                 }
-                
-                final DimensionState finalState = activeState;
-                long batchKey = DistanceGraph.getBatchKey(batch.get(0).x(), batch.get(0).z());
-                finalState.batchCounters.put(batchKey, new AtomicInteger(batch.size()));
 
-                // skip if already tracked locally
-                List<ChunkPos> preFiltered = new ArrayList<>(batch.size());
-                for (ChunkPos pos : batch) {
-                    long key = pos.pack();
-                    if (finalState.completedChunks.contains(key) || finalState.trackedChunks.contains(key)) {
-                        onSuccess(finalState, pos);
-                    } else {
-                        preFiltered.add(pos);
-                    }
-                }
-
-                if (preFiltered.isEmpty()) {
-                    finalState.trackedBatches.remove(batchKey);
-                    finalState.batchCounters.remove(batchKey);
-                    continue;
-                }
-
-                // dispatch tasks
-                List<ChunkPos> readyToGenerate = new ArrayList<>();
-                int processedCount = 0;
-                for (ChunkPos pos : preFiltered) {
-                    if (!workerRunning.get()) break;
-
-                    boolean acquired = false;
-                    try {
-                        // Rate cap first, semaphore second: a permit held while sleeping off the
-                        // rate budget would starve in-flight tasks of nothing, but it would make
-                        // getActiveTaskCount lie about how much work is actually running.
-                        awaitGenerationRate();
-                        acquired = throttle.tryAcquire(50, java.util.concurrent.TimeUnit.MILLISECONDS);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
-                    
-                    if (!acquired) break;
-                    
-                    processedCount++;
-                    if (finalState.trackedChunks.add(pos.pack())) {
-                        finalState.taskStartMs.put(pos.pack(), System.currentTimeMillis());
-                        activeTaskCount.incrementAndGet();
-                        stats.incrementQueued();
-                        
-                        if (finalState.tellusActive) {
-                            TellusIntegration.enqueueGenerate(finalState.level, pos, () -> {
-                                onSuccess(finalState, pos);
-                                completeTask(finalState, pos);
-                            });
-                            continue;
-                        }
-                        
-                        readyToGenerate.add(pos);
-                    } else {
-                        throttle.release();
-                        onFailure(finalState, pos);
-                    }
-                }
-                
-                if (processedCount < preFiltered.size()) {
-                    finalState.trackedBatches.remove(batchKey);
-                    finalState.batchCounters.remove(batchKey);
-                }
-
-                if (!readyToGenerate.isEmpty()) {
-                    server.execute(() -> {
-                        ServerChunkCache cache = finalState.level.getChunkSource();
-                        List<ChunkPos> actuallyGenerate = new ArrayList<>();
-                        
-                        for (ChunkPos pos : readyToGenerate) {
-                            // getChunkNow never blocks: hasChunk+getChunk could park the main thread in
-                            // getChunkBlocking when the FULL future isn't actually complete (C2ME), and a
-                            // single stuck worldgen worker then becomes a watchdog kill (BMC3 18:14 crash)
-                            LevelChunk existingChunk = cache.getChunkNow(pos.x(), pos.z());
-                            if (existingChunk != null) {
-                                if (!existingChunk.isEmpty()) {
-                                    VoxyIntegration.ingestChunk(existingChunk);
-                                    com.ethan.voxyworldgenv2.network.NetworkHandler.broadcastLODData(existingChunk);
-                                }
-                                onSuccess(finalState, pos);
-                                completeTask(finalState, pos);
-                            } else {
-                                queueTicketAdd(finalState.level, pos);
-                                actuallyGenerate.add(pos);
-                            }
-                        }
-                        
-                        if (!actuallyGenerate.isEmpty()) {
-                            // apply tickets immediately to ensure DistanceManager is aware of them, keeps stuff nice and clean
-                            processPendingTickets();
-
-                            for (ChunkPos pos : actuallyGenerate) {
-                                ((ServerChunkCacheMixin) cache).invokeGetChunkFutureMainThread(pos.x(), pos.z(), ChunkStatus.FULL, true)
-                                    .whenCompleteAsync((result, throwable) -> {
-                                        if (throwable == null && result != null && result.isSuccess() && result.orElse(null) instanceof LevelChunk chunk) {
-                                            onSuccess(finalState, pos);
-                                            if (!chunk.isEmpty()) {
-                                                VoxyIntegration.ingestChunk(chunk);
-                                                com.ethan.voxyworldgenv2.network.NetworkHandler.broadcastLODData(chunk);
-                                            }
-                                        } else {
-                                            onFailure(finalState, pos);
-                                        }
-                                        cleanupTask(finalState.level, pos);
-                                    }, server);
-                            }
-                        }
-                    });
-                }
+                int limit = Math.max(1, (int) Math.ceil(batch.size() * load));
+                dispatchBatch(activeState, batch, limit);
 
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -498,6 +428,187 @@ public final class ChunkGenerationManager {
                 try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
             }
         }
+    }
+
+    /**
+     * Fills a radius around world spawn while nobody is online. The chunk system keeps ticking on
+     * an empty server, but every other work source above is player-anchored, so without this the
+     * worker simply idles.
+     *
+     * <p>Routed through {@link #getOrSetupState}/{@link #setupLevel} exactly as a player-driven
+     * dimension is, so {@code ChunkPersistence.load} runs and {@code state.loaded} is set --
+     * otherwise the anchor would re-generate everything on every restart and then silently discard
+     * its own progress at shutdown, since shutdown() persists only loaded states.
+     *
+     * <p>Chunk tickets are taken by {@link #dispatchBatch} exactly as for a player, and released by
+     * {@link #cleanupTask} and {@link #releaseAllTickets}. See {@code appliedTickets}'s field
+     * comment for why an unreleased one is a boot hang, not just a leak.
+     */
+    private boolean dispatchSpawnPregen(int budget) {
+        if (!Config.DATA.spawnPregenEnabled) return false;
+        MinecraftServer srv = this.server;
+        if (srv == null) return false;
+
+        ServerLevel level = srv.overworld();
+        if (level == null) return false;
+
+        DimensionState ds = getOrSetupState(level);
+        if (!ds.loaded) {
+            // setupLevel touches level storage (ChunkPersistence.load), so it is scheduled onto
+            // the server thread; this pass yields and picks the anchor back up once it's loaded.
+            srv.execute(() -> setupLevel(level));
+            return false;
+        }
+
+        // Inlined from unified's ChunkPosCompat.spawnChunk: this branch has no spawn chunks, no
+        // spawnChunkRadius gamerule and no TicketType.START, so the anchor supplies its own
+        // centre from the world's respawn position rather than a player.
+        ChunkPos centre = ChunkPos.containing(level.getRespawnData().pos());
+        int radius = Math.max(1, Config.DATA.spawnPregenRadius);
+
+        int dispatched = 0;
+        while (dispatched < budget) {
+            List<ChunkPos> batch = ds.distanceGraph.findWork(centre, radius, ds.trackedBatches);
+            if (batch == null) break; // radius is full
+            int sent = dispatchBatch(ds, batch, budget - dispatched);
+            if (sent == 0) break;
+            dispatched += sent;
+        }
+        return dispatched > 0;
+    }
+
+    /**
+     * Dispatches up to {@code limit} chunks from one batch findWork returned, either around a
+     * player or (from {@link #dispatchSpawnPregen}) around world spawn. Returns how many chunks
+     * were actually handed to the chunk system or short-circuited as already done/in-flight.
+     */
+    private int dispatchBatch(DimensionState state, List<ChunkPos> batch, int limit) {
+        long batchKey = DistanceGraph.getBatchKey(batch.get(0).x(), batch.get(0).z());
+        state.batchCounters.put(batchKey, new AtomicInteger(batch.size()));
+
+        // skip if already tracked locally
+        List<ChunkPos> preFiltered = new ArrayList<>(batch.size());
+        for (ChunkPos pos : batch) {
+            long key = pos.pack();
+            if (state.completedChunks.contains(key) || state.trackedChunks.contains(key)) {
+                onSuccess(state, pos);
+            } else {
+                preFiltered.add(pos);
+            }
+        }
+
+        if (preFiltered.isEmpty()) {
+            state.trackedBatches.remove(batchKey);
+            state.batchCounters.remove(batchKey);
+            return 0;
+        }
+
+        // dispatch tasks
+        List<ChunkPos> readyToGenerate = new ArrayList<>();
+        int processedCount = 0;
+        for (ChunkPos pos : preFiltered) {
+            if (!workerRunning.get() || processedCount >= limit) break;
+
+            boolean acquired = false;
+            try {
+                // Rate cap first, semaphore second: a permit held while sleeping off the
+                // rate budget would starve in-flight tasks of nothing, but it would make
+                // getActiveTaskCount lie about how much work is actually running.
+                awaitGenerationRate();
+                acquired = throttle.tryAcquire(50, java.util.concurrent.TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+
+            if (!acquired) break;
+
+            processedCount++;
+            if (state.trackedChunks.add(pos.pack())) {
+                state.taskStartMs.put(pos.pack(), System.currentTimeMillis());
+                activeTaskCount.incrementAndGet();
+                stats.incrementQueued();
+
+                if (state.tellusActive) {
+                    TellusIntegration.enqueueGenerate(state.level, pos, () -> {
+                        onSuccess(state, pos);
+                        completeTask(state, pos);
+                    });
+                    continue;
+                }
+
+                readyToGenerate.add(pos);
+            } else {
+                throttle.release();
+                onFailure(state, pos);
+            }
+        }
+
+        if (processedCount < preFiltered.size()) {
+            state.trackedBatches.remove(batchKey);
+            state.batchCounters.remove(batchKey);
+        }
+
+        if (!readyToGenerate.isEmpty()) {
+            final DimensionState finalState = state;
+            server.execute(() -> {
+                ServerChunkCache cache = finalState.level.getChunkSource();
+                List<ChunkPos> actuallyGenerate = new ArrayList<>();
+
+                for (ChunkPos pos : readyToGenerate) {
+                    // getChunkNow never blocks: hasChunk+getChunk could park the main thread in
+                    // getChunkBlocking when the FULL future isn't actually complete (C2ME), and a
+                    // single stuck worldgen worker then becomes a watchdog kill (BMC3 18:14 crash)
+                    LevelChunk existingChunk = cache.getChunkNow(pos.x(), pos.z());
+                    if (existingChunk != null) {
+                        if (!existingChunk.isEmpty()) {
+                            VoxyIntegration.ingestChunk(existingChunk);
+                            com.ethan.voxyworldgenv2.network.NetworkHandler.broadcastLODData(existingChunk);
+                        }
+                        onSuccess(finalState, pos);
+                        completeTask(finalState, pos);
+                    } else {
+                        queueTicketAdd(finalState.level, pos);
+                        actuallyGenerate.add(pos);
+                    }
+                }
+
+                if (!actuallyGenerate.isEmpty()) {
+                    // apply tickets immediately to ensure DistanceManager is aware of them, keeps stuff nice and clean
+                    processPendingTickets();
+
+                    for (ChunkPos pos : actuallyGenerate) {
+                        ((ServerChunkCacheMixin) cache).invokeGetChunkFutureMainThread(pos.x(), pos.z(), ChunkStatus.FULL, true)
+                            .whenCompleteAsync((result, throwable) -> {
+                                if (throwable == null && result != null && result.isSuccess() && result.orElse(null) instanceof LevelChunk chunk) {
+                                    onSuccess(finalState, pos);
+                                    if (!chunk.isEmpty()) {
+                                        VoxyIntegration.ingestChunk(chunk);
+                                        com.ethan.voxyworldgenv2.network.NetworkHandler.broadcastLODData(chunk);
+                                    }
+                                } else {
+                                    onFailure(finalState, pos);
+                                }
+                                cleanupTask(finalState.level, pos);
+                            }, server);
+                    }
+                }
+            });
+        }
+        return processedCount;
+    }
+
+    // returns a new list rotated so the element at offset comes first (fair iteration)
+    private static <T> List<T> rotated(List<T> list, int offset) {
+        int n = list.size();
+        if (n <= 1) return list;
+        offset = ((offset % n) + n) % n;
+        if (offset == 0) return list;
+        List<T> out = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            out.add(list.get((i + offset) % n));
+        }
+        return out;
     }
 
     public void tick() {
@@ -753,8 +864,12 @@ public final class ChunkGenerationManager {
             ServerChunkCache cache = op.level().getChunkSource();
             if (op.add()) {
                 cache.addTicketWithRadius(TicketType.FORCED, op.pos(), 0);
+                appliedTickets.computeIfAbsent(op.level(), k -> LongSets.synchronize(new LongOpenHashSet()))
+                    .add(op.pos().pack());
             } else {
                 cache.removeTicketWithRadius(TicketType.FORCED, op.pos(), 0);
+                LongSet set = appliedTickets.get(op.level());
+                if (set != null) set.remove(op.pos().pack());
             }
             modifiedLevels.add(op.level());
         }
@@ -762,7 +877,36 @@ public final class ChunkGenerationManager {
             ((ServerChunkCacheMixin) level.getChunkSource()).invokeRunDistanceManagerUpdates();
         }
     }
-    
+
+    /**
+     * Removes every forced ticket we've actually applied, so nothing stays pinned after shutdown.
+     * TicketType.FORCED carries FLAG_PERSIST: an unreleased one is written into the world's
+     * chunk_tickets SavedData and reactivated by prepareLevels() on the next boot, which then
+     * blocks "Loading initial chunks" until every leaked chunk reaches FULL. Player-driven
+     * generation self-limits this risk (players log off and in-flight tasks drain), but spawn
+     * pregen can run unattended for hours with a wide radius, so this stops being a theoretical
+     * edge case for it.
+     */
+    private void releaseAllTickets() {
+        // drop queued ops first so we don't re-add a ticket we're about to remove
+        pendingTicketOps.clear();
+
+        for (var entry : appliedTickets.entrySet()) {
+            ServerLevel level = entry.getKey();
+            LongSet positions = entry.getValue();
+            ServerChunkCache cache = level.getChunkSource();
+            synchronized (positions) {
+                var it = positions.iterator();
+                while (it.hasNext()) {
+                    long key = it.nextLong();
+                    cache.removeTicketWithRadius(TicketType.FORCED, ChunkPos.unpack(key), 0);
+                }
+            }
+            ((ServerChunkCacheMixin) cache).invokeRunDistanceManagerUpdates();
+        }
+        appliedTickets.clear();
+    }
+
     private void queueTicketAdd(ServerLevel level, ChunkPos pos) {
         pendingTicketOps.add(new TicketOp(level, pos, true));
     }
@@ -780,6 +924,7 @@ public final class ChunkGenerationManager {
 
     private void onSuccess(DimensionState state, ChunkPos pos) {
         long key = pos.pack();
+        state.failCounts.remove(key);
         if (state.completedChunks.add(key)) {
             stats.incrementCompleted();
             state.distanceGraph.markChunkCompleted(pos.x(), pos.z());
@@ -790,10 +935,25 @@ public final class ChunkGenerationManager {
         }
         decrementBatch(state, pos);
     }
-    
+
+    /**
+     * A chunk whose generation future resolves but keeps failing would otherwise never set its
+     * completion bit, so findWork would re-offer its batch forever -- the same failure family as
+     * the batch-boundary termination bug, just triggered by repeated failure instead of boundary
+     * math. After a few tries, force the bit set so the batch can still retire.
+     */
     private void onFailure(DimensionState state, ChunkPos pos) {
         stats.incrementFailed();
-        state.remainingInRadius.updateAndGet(v -> Math.max(0, v - 1));
+        long key = pos.pack();
+        int fails = state.failCounts.merge(key, 1, Integer::sum);
+        // Only decrement remaining-in-radius once we've actually given up: a transient failure
+        // that will be retried is not "done", and counting it as done here would under-report
+        // remaining work while the chunk keeps getting retried.
+        if (fails >= MAX_CHUNK_RETRIES) {
+            state.failCounts.remove(key);
+            state.distanceGraph.markChunkCompleted(pos.x(), pos.z());
+            state.remainingInRadius.updateAndGet(v -> Math.max(0, v - 1));
+        }
         decrementBatch(state, pos);
     }
 
@@ -830,17 +990,25 @@ public final class ChunkGenerationManager {
         // tasks are dead weight holding permits the occupied dimension needs — reclaim those
         // after a short grace. The permit pool is global; this is what keeps a teleport from
         // stalling generation where the player actually is.
+        //
+        // But spawn pregen dispatches precisely when the player list is empty (see
+        // dispatchSpawnPregen), so an empty player list does not mean every dimension is idle --
+        // the pregen target has legitimately in-flight tasks of its own. If nobody is online
+        // anywhere, there is no occupied dimension whose permits need protecting from an idle
+        // one, so the short grace would only punish the pregen anchor's own tasks. Fall back to
+        // the full timeout everywhere in that case.
         Set<ResourceKey<Level>> occupied = new HashSet<>();
         for (ServerPlayer p : PlayerTracker.getInstance().getPlayers()) {
             occupied.add(p.level().dimension());
         }
+        boolean anyoneOnline = !occupied.isEmpty();
         long occupiedCutoff = now - timeout * 1000L;
         long emptyCutoff = now - Math.min(5, timeout) * 1000L;
 
         for (var entry : dimensionStates.entrySet()) {
             DimensionState state = entry.getValue();
             if (state.taskStartMs.isEmpty()) continue;
-            boolean hasPlayers = occupied.contains(entry.getKey());
+            boolean hasPlayers = !anyoneOnline || occupied.contains(entry.getKey());
             long cutoff = hasPlayers ? occupiedCutoff : emptyCutoff;
             java.util.List<Long> stuck = new ArrayList<>();
             state.taskStartMs.forEach((posKey, started) -> {
