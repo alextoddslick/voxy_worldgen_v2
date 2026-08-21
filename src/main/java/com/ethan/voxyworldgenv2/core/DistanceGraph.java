@@ -186,6 +186,9 @@ public class DistanceGraph {
         int cbx = center.x >> BATCH_SIZE_SHIFT;
         int cbz = center.z >> BATCH_SIZE_SHIFT;
         int rb = (radiusChunks + 3) >> BATCH_SIZE_SHIFT;
+        final int centerX = center.x;
+        final int centerZ = center.z;
+        final long chunkRadiusSq = (long) radiusChunks * radiusChunks;
 
         // use a priority queue to process chunks from nearest to farthest
         PriorityQueue<CollectItem> queue = new PriorityQueue<>(Comparator.comparingDouble(i -> i.distSq));
@@ -221,6 +224,13 @@ public class DistanceGraph {
                         int lx = i & 3;
                         int lz = i >> 2;
                         ChunkPos pos = new ChunkPos((item.x << 2) + lx, (item.z << 2) + lz);
+                        // Per-chunk radius filter. The batch-level test above works in 4-chunk
+                        // units, so without this the emit reaches ~3 chunks past radiusChunks --
+                        // more than the caller actually asked for (generationRadius, or a
+                        // /voxygen refresh override).
+                        int dxc = pos.x - centerX;
+                        int dzc = pos.z - centerZ;
+                        if ((long) dxc * dxc + (long) dzc * dzc > chunkRadiusSq) continue;
                         if (!alreadySynced.contains(pos.toLong())) {
                             out.add(pos);
                             if (out.size() >= maxResults) return;

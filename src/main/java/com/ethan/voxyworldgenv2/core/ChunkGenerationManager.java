@@ -188,10 +188,15 @@ public final class ChunkGenerationManager {
 
     /**
      * Streams already-generated-but-unsynced chunks near each player, nearest first (one batch of
-     * up to 64 per call, one player per call). Returns true if a batch was dispatched. Bandwidth
-     * stays bounded by LodSendQueue's per-player token bucket regardless of call frequency.
+     * up to 64 per player per call, every player per call). Returns true if any player was
+     * dispatched. Bandwidth stays bounded by LodSendQueue's per-player token bucket regardless of
+     * call frequency; the real back-pressure on how many players this can serve in one pass is the
+     * outstanding-load ceiling below, not an arbitrary "one player per call" limit -- there is no
+     * reason to make every other player wait a full worker-loop pass just because the first player
+     * in the list had work.
      */
     private boolean dispatchCatchUpSync(List<ServerPlayer> players) {
+        boolean dispatchedAny = false;
         for (ServerPlayer player : players) {
             var synced = PlayerTracker.getInstance()
                 .getSyncedChunks(player.getUUID(), player.level().dimension());
@@ -210,8 +215,11 @@ public final class ChunkGenerationManager {
 
             // Never claim more than the outstanding-load ceiling allows: the batch is pre-marked
             // synced below, so anything claimed and then dropped for lack of budget would be lost.
+            // The ceiling is global, not per player, so once it's exhausted no player's non-resident
+            // chunks can be safely claimed this pass -- stop rather than spin through the rest of
+            // the list for nothing.
             int loadBudget = MAX_CATCHUP_LOADS_IN_FLIGHT - catchUpLoadsInFlight.get();
-            if (loadBudget <= 0) return false;
+            if (loadBudget <= 0) return dispatchedAny;
 
             List<ChunkPos> syncBatch = new ArrayList<>();
             ds.distanceGraph.collectCompletedInRange(
@@ -272,14 +280,23 @@ public final class ChunkGenerationManager {
                                     .invokeGetChunkFutureMainThread(pos.x, pos.z, ChunkStatus.FULL, true)
                                     .whenCompleteAsync((result, throwable) -> {
                                         ServerPlayer target = server.getPlayerList().getPlayer(playerUUID);
+                                        // Track whether the send ACTUALLY happened. The previous shape
+                                        // attached the markDeferred branch to the outer success condition,
+                                        // so a successful load whose send was skipped -- player logged off
+                                        // mid-load, or an empty chunk -- fell through both branches: not
+                                        // sent, not deferred, and still claimed from the pre-mark above.
+                                        // That chunk was then lost for the rest of the session.
+                                        boolean sent = false;
                                         if (throwable == null && result != null && result.isSuccess()
                                                 && result.orElse(null) instanceof LevelChunk chunk) {
                                             if (target != null && !chunk.isEmpty()) {
                                                 com.ethan.voxyworldgenv2.network.NetworkHandler.sendLODData(target, chunk);
+                                                sent = true;
                                             }
-                                        } else if (store != null && Config.DATA.rememberSentChunks) {
-                                            // Load failed and the batch was already pre-marked synced,
-                                            // so without this the chunk is claimed and never arrives.
+                                        }
+                                        if (!sent && store != null && Config.DATA.rememberSentChunks) {
+                                            // Claimed but not delivered; onChunkLoad re-sends it on the
+                                            // next load.
                                             store.markDeferred(dimId, pos.toLong());
                                         }
                                         // Release the ticket only; this chunk was never a generation
@@ -292,10 +309,12 @@ public final class ChunkGenerationManager {
                         }
                     }
                 });
-                return true; // processed one player per call
+                dispatchedAny = true;
+                // Continue rather than return: see the outstanding-load ceiling note above.
+                continue;
             }
         }
-        return false;
+        return dispatchedAny;
     }
 
     private void workerLoop() {
