@@ -8,6 +8,7 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerChunkEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
+import net.fabricmc.loader.api.FabricLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -17,7 +18,7 @@ public class VoxyWorldGenV2 implements ModInitializer {
 
     @Override
     public void onInitialize() {
-        LOGGER.info("voxy world gen v2 initializing");
+        LOGGER.info("voxy world gen v2 initializing (version {})", modVersion());
         com.ethan.voxyworldgenv2.core.Config.load();
         NetworkHandler.init();
         
@@ -40,5 +41,18 @@ public class VoxyWorldGenV2 implements ModInitializer {
         net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback.EVENT.register(
             (dispatcher, registryAccess, environment) ->
                 com.ethan.voxyworldgenv2.command.VoxyGenCommand.register(dispatcher));
+    }
+
+    /**
+     * Reads the version FabricLoader parsed out of {@code fabric.mod.json}, which is itself
+     * stamped from {@code gradle.properties}' {@code version} at build time (see
+     * {@code processResources} in build.gradle). Sourcing the startup log line from here rather
+     * than a literal means the log and the jar filename can never disagree about what build this
+     * is — the exact ambiguity that made five differently-built jars all claim "2.2.5".
+     */
+    private static String modVersion() {
+        return FabricLoader.getInstance().getModContainer(MOD_ID)
+            .map(c -> c.getMetadata().getVersion().getFriendlyString())
+            .orElse("unknown");
     }
 }
