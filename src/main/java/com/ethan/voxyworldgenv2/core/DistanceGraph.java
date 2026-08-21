@@ -51,15 +51,22 @@ public class DistanceGraph {
         if ((node.fullMask & (1L << idx)) != 0) return;
 
         if (node.level == 1) {
-            Integer mask = (Integer) node.children.getOrDefault(idx, 0);
-            mask |= (1 << bit);
-            if (mask == 0xFFFF) {
-                synchronized(node) {
+            // getOrDefault / OR / put is a read-modify-write, and ConcurrentHashMap does not make
+            // that atomic. Two concurrent marks on the same batch (e.g. TellusIntegration.enqueueGenerate
+            // completing on its own thread pool, racing a normal completion) lose a bit, and nothing
+            // else ever re-marks a chunk already recorded completed -- so the loss is permanent: a
+            // fully generated batch stuck below 0xFFFF, re-offered by findWork forever. The node
+            // monitor was already being taken two lines down for the mask==0xFFFF case, so widening
+            // it to guard the whole read-modify-write costs nothing.
+            synchronized (node) {
+                if ((node.fullMask & (1L << idx)) != 0) return;
+                int mask = ((Integer) node.children.getOrDefault(idx, 0)) | (1 << bit);
+                if (mask == 0xFFFF) {
                     node.fullMask |= (1L << idx);
                     node.children.remove(idx);
+                } else {
+                    node.children.put(idx, mask);
                 }
-            } else {
-                node.children.put(idx, mask);
             }
         } else {
             Node child = (Node) node.children.computeIfAbsent(idx, k -> {
