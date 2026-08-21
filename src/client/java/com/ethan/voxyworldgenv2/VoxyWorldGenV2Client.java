@@ -23,12 +23,15 @@ public class VoxyWorldGenV2Client implements ClientModInitializer {
         net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
             com.ethan.voxyworldgenv2.network.NetworkState.setServerConnected(false);
             com.ethan.voxyworldgenv2.client.LodMemory.onDisconnect();
+            com.ethan.voxyworldgenv2.client.ClientStorageReporter.onDisconnect();
         });
 
-        // tick network stats and the LOD memory (dimension change detection + debounced flush)
+        // tick network stats, the LOD memory (dimension change detection + debounced flush), and
+        // the protocol-5 disk-usage reporter (StorageReportPayload)
         net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(client -> {
             com.ethan.voxyworldgenv2.network.NetworkState.tick();
             com.ethan.voxyworldgenv2.client.LodMemory.tick(client);
+            com.ethan.voxyworldgenv2.client.ClientStorageReporter.tick(client);
         });
     }
 }

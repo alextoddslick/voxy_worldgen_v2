@@ -8,6 +8,13 @@ public class NetworkState {
     private static final AtomicLong chunksReceived = new AtomicLong(0);
     private static final AtomicLong bytesReceived = new AtomicLong(0);
 
+    // Last values pushed by the server over the protocol-5 config/settings payloads. Held here
+    // (client-agnostic, main source set) rather than a dedicated holder class so a future settings
+    // screen has somewhere to read from without adding another cross-thread singleton.
+    private static volatile com.ethan.voxyworldgenv2.core.Config.ServerConfig lastServerConfig = null;
+    private static volatile boolean canEditServerConfig = false;
+    private static volatile NetworkHandler.SettingsSnapshotPayload lastSettingsSnapshot = null;
+
     private static double receiveRate = 0; // chunks/s
     private static double bandwidthRate = 0; // bytes/s
 
@@ -26,6 +33,9 @@ public class NetworkState {
             lastChunkCount = 0;
             lastByteCount = 0;
             serverProtocol = 0;
+            lastServerConfig = null;
+            canEditServerConfig = false;
+            lastSettingsSnapshot = null;
         }
     }
 
@@ -41,9 +51,49 @@ public class NetworkState {
         return serverProtocol;
     }
 
-    /** The server registered the known-chunks payload, so sending it will not drop the connection. */
+    /**
+     * Feature gates are floors, never equality: a newer server must keep accepting everything an
+     * older one did. An unregistered serverbound payload drops the connection, which is why the
+     * client checks before sending rather than after failing.
+     */
     public static boolean supportsKnownChunks() {
         return serverConnected && serverProtocol >= 2;
+    }
+
+    /** The server registered the storage-report payload (protocol 5+). */
+    public static boolean supportsStorageReport() {
+        return serverConnected && serverProtocol >= 5;
+    }
+
+    /** The server registered the server-config sync/push payloads (protocol 5+). */
+    public static boolean supportsServerConfig() {
+        return serverConnected && serverProtocol >= 5;
+    }
+
+    /** The server registered the settings snapshot/update payloads (protocol 5+). */
+    public static boolean supportsSettingsSync() {
+        return serverConnected && serverProtocol >= 5;
+    }
+
+    public static void setServerConfig(com.ethan.voxyworldgenv2.core.Config.ServerConfig config, boolean canEdit) {
+        lastServerConfig = config;
+        canEditServerConfig = canEdit;
+    }
+
+    public static com.ethan.voxyworldgenv2.core.Config.ServerConfig getServerConfig() {
+        return lastServerConfig;
+    }
+
+    public static boolean canEditServerConfig() {
+        return canEditServerConfig;
+    }
+
+    public static void setSettingsSnapshot(NetworkHandler.SettingsSnapshotPayload snapshot) {
+        lastSettingsSnapshot = snapshot;
+    }
+
+    public static NetworkHandler.SettingsSnapshotPayload getSettingsSnapshot() {
+        return lastSettingsSnapshot;
     }
 
     public static void incrementReceived(long bytes) {

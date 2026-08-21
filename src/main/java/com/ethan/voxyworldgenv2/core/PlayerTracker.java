@@ -24,6 +24,16 @@ public class PlayerTracker {
     private final Map<UUID, SyncedChunkStore> syncedChunks;
 
     /**
+     * The peer's announced protocol, recorded from the {@code HandshakeAckPayload}. Gating
+     * clientbound protocol-5 payloads on a floor here is what lets an older client keep receiving
+     * terrain while simply not being offered features its build cannot parse.
+     */
+    private final Map<UUID, Integer> clientProtocols = new ConcurrentHashMap<>();
+
+    /** How many bytes of on-disk Voxy store the client last reported, or -1 if never reported. */
+    private final Map<UUID, Long> diskBytesReported = new ConcurrentHashMap<>();
+
+    /**
      * When a player entered a dimension and has not yet uploaded what they already have.
      * Keyed UUID -> dimension id -> millis at which the wait started.
      */
@@ -76,6 +86,8 @@ public class PlayerTracker {
         awaitingKnownSet.remove(id);
         refreshRadius.remove(id);
         knownChunksBudget.remove(id);
+        clientProtocols.remove(id);
+        diskBytesReported.remove(id);
     }
 
     /**
@@ -96,6 +108,8 @@ public class PlayerTracker {
         awaitingKnownSet.remove(id);
         refreshRadius.remove(id);
         knownChunksBudget.remove(id);
+        clientProtocols.remove(id);
+        diskBytesReported.remove(id);
     }
 
     public void clear() {
@@ -104,6 +118,8 @@ public class PlayerTracker {
         awaitingKnownSet.clear();
         refreshRadius.clear();
         knownChunksBudget.clear();
+        clientProtocols.clear();
+        diskBytesReported.clear();
     }
 
     /**
@@ -134,6 +150,8 @@ public class PlayerTracker {
                 awaitingKnownSet.remove(entry.getKey());
                 refreshRadius.remove(entry.getKey());
                 knownChunksBudget.remove(entry.getKey());
+                clientProtocols.remove(entry.getKey());
+                diskBytesReported.remove(entry.getKey());
                 removed++;
             } else if (live != entry.getValue()) {
                 entry.setValue(live);
@@ -243,5 +261,22 @@ public class PlayerTracker {
 
     public int getPlayerCount() {
         return players.size();
+    }
+
+    public void setClientProtocol(UUID uuid, int protocol) {
+        clientProtocols.put(uuid, protocol);
+    }
+
+    public int getClientProtocol(UUID uuid) {
+        return clientProtocols.getOrDefault(uuid, 0);
+    }
+
+    /** -1 if this player has never reported their on-disk Voxy store size this session. */
+    public long getDiskBytes(UUID uuid) {
+        return diskBytesReported.getOrDefault(uuid, -1L);
+    }
+
+    public void setDiskBytes(UUID uuid, long bytes) {
+        diskBytesReported.put(uuid, bytes);
     }
 }

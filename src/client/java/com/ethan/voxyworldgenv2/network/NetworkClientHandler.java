@@ -21,7 +21,15 @@ public class NetworkClientHandler {
             int protocol = payload.protocolVersion();
             context.client().execute(() -> {
                 NetworkState.setServerConnected(serverHasMod);
-                NetworkState.setServerProtocol(protocol);
+                NetworkState.setServerProtocol(serverHasMod ? protocol : 0);
+                // Ack with OUR protocol, not a repeat of theirs: the server records this rather
+                // than comparing, since every serverbound protocol-5+ feature is gated on a floor
+                // (supportsStorageReport, supportsServerConfig, supportsSettingsSync) -- sending a
+                // payload the peer never registered drops the connection, which is why this must
+                // go out before anything else is sent.
+                if (serverHasMod) {
+                    ClientPlayNetworking.send(new NetworkHandler.HandshakeAckPayload(NetworkHandler.PROTOCOL_VERSION));
+                }
             });
         });
 
@@ -30,6 +38,12 @@ public class NetworkClientHandler {
                 handleLODData(payload);
             });
         });
+
+        ClientPlayNetworking.registerGlobalReceiver(NetworkHandler.ServerConfigPayload.TYPE, (payload, context) ->
+            context.client().execute(() -> NetworkState.setServerConfig(payload.config(), payload.canEdit())));
+
+        ClientPlayNetworking.registerGlobalReceiver(NetworkHandler.SettingsSnapshotPayload.TYPE, (payload, context) ->
+            context.client().execute(() -> NetworkState.setSettingsSnapshot(payload)));
     }
 
     @SuppressWarnings("unchecked")
