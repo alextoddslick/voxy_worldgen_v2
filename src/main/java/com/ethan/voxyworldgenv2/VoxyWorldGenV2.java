@@ -50,7 +50,7 @@ public class VoxyWorldGenV2 implements ModInitializer {
      * than a literal means the log and the jar filename can never disagree about what build this
      * is — the exact ambiguity that made five differently-built jars all claim "2.2.5".
      */
-    private static String modVersion() {
+    public static String modVersion() {
         return FabricLoader.getInstance().getModContainer(MOD_ID)
             .map(c -> c.getMetadata().getVersion().getFriendlyString())
             .orElse("unknown");

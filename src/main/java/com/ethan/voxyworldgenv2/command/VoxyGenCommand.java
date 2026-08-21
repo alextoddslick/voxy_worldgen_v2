@@ -1,5 +1,7 @@
 package com.ethan.voxyworldgenv2.command;
 
+import com.ethan.voxyworldgenv2.VoxyWorldGenV2;
+
 import com.ethan.voxyworldgenv2.core.ChunkGenerationManager;
 import com.ethan.voxyworldgenv2.core.Config;
 import com.ethan.voxyworldgenv2.core.PlayerTracker;
@@ -92,17 +94,6 @@ public final class VoxyGenCommand {
         return Math.min(4, Math.max(0, Config.DATA.refreshPermissionLevel));
     }
 
-    /**
-     * Reads the running game's version off FabricLoader's "minecraft" mod container -- the same
-     * source VoxyWorldGenV2.modVersion() already uses for the startup log line -- rather than a
-     * literal. A hardcoded string here would silently lie the next time this branch gets ported to
-     * a newer MC version and nobody remembers to touch this one line.
-     */
-    private static String mcVersion() {
-        return FabricLoader.getInstance().getModContainer("minecraft")
-            .map(c -> c.getMetadata().getVersion().getFriendlyString())
-            .orElse("unknown");
-    }
 
     // ---- subtrees -------------------------------------------------------------------------
 
@@ -240,7 +231,7 @@ public final class VoxyGenCommand {
         var stats = mgr.getStats();
         var q = LodSendQueue.getInstance();
 
-        reply(ctx, String.format("§6Voxy World Gen V2§r  (MC %s)", mcVersion()));
+        reply(ctx, "§6Voxy World Gen V2§r  v" + VoxyWorldGenV2.modVersion());
         reply(ctx, String.format("  generation: %s   players tracked: %d",
             Config.DATA.enabled ? "§aon§r" : "§coff§r", PlayerTracker.getInstance().getPlayerCount()));
         reply(ctx, String.format("  chunks: §a%d§r done, §e%d§r queued, §c%d§r failed, %d skipped",
