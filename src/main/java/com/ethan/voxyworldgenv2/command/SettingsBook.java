@@ -149,16 +149,47 @@ public final class SettingsBook {
         p.append(opt("off", "/voxygen loginterval off", "no progress logging"));
         p.append(nl());
 
-        p.append(Component.literal("\nGen rate caps chunks/s to spare FPS; radius and tasks are on page 1. In singleplayer they edit the SP profile.")
+        boolean sp = ChunkGenerationManager.getInstance().isSingleplayer();
+        int dist = Config.getSendDistanceChunks(sp);
+        p.append(name("Send dist: "));
+        p.append(value(dist <= 0 ? "unlimited" : dist + " chunks"));
+        p.append(nl());
+        p.append(opt("128", "/voxygen senddistance 128", "stream LODs up to 128 chunks out"));
+        p.append(opt("256", "/voxygen senddistance 256", "stream LODs up to 256 chunks out"));
+        p.append(opt("512", "/voxygen senddistance 512", "stream LODs up to 512 chunks out"));
+        p.append(opt("off", "/voxygen senddistance off", "no distance cap"));
+        p.append(nl());
+
+        // HUD stat toggles: what the tab HUD and /voxygen traffic render per player
+        p.append(name("HUD stats:"));
+        p.append(nl());
+        p.append(hudToggle("wire", c.hudShowCompressed, "compressed bytes actually sent"));
+        p.append(hudToggle("zip", c.hudShowSavings, "compression ratio and bytes saved"));
+        p.append(hudToggle("disk", c.hudShowClientDisk, "each client's Voxy store size"));
+        p.append(nl());
+
+        p.append(Component.literal("\nGen rate caps chunks/s to spare FPS; radius and tasks are on page 1.")
             .withStyle(ChatFormatting.DARK_GRAY));
         return p;
+    }
+
+    /** One [label on/off] chip; clicking flips the toggle and re-opens the book. */
+    private static Component hudToggle(String label, boolean state, String hover) {
+        String stat = switch (label) {
+            case "wire" -> "compressed";
+            case "zip" -> "savings";
+            case "disk" -> "clientdisk";
+            default -> label;
+        };
+        return opt(label + " " + (state ? "on" : "off"),
+            "/voxygen hud " + stat + " " + !state,
+            (state ? "hide " : "show ") + hover);
     }
 
     private static Component statsPage() {
         var mgr = ChunkGenerationManager.getInstance();
         var st = mgr.getStats();
         var q = LodSendQueue.getInstance();
-        long bps = q.getCurrentBytesPerSecond();
         MutableComponent p = Component.empty();
 
         p.append(Component.literal("Live Stats\n").withStyle(ChatFormatting.DARK_PURPLE, ChatFormatting.BOLD));
@@ -172,13 +203,13 @@ public final class SettingsBook {
         p.append(line("Failed", String.valueOf(st.getFailed())));
         p.append(line("Send q", q.getQueuedJobs() + " / " + q.getMaxQueuedJobs()));
         p.append(line("Deferred", String.valueOf(q.getJobsDropped())));
-        p.append(line("Sent", human(q.getBytesSent())));
+        p.append(line("Sent", human(q.getWireBytesSent()) + " wire"));
         long raw = com.ethan.voxyworldgenv2.network.NetworkHandler.RAW_SECTION_BYTES.get();
         long wire = com.ethan.voxyworldgenv2.network.NetworkHandler.WIRE_SECTION_BYTES.get();
-        if (raw > 0 && wire > 0) {
-            p.append(line("Zip", String.format("%.1fx", (double) raw / wire)));
+        if (Config.DATA.hudShowSavings && raw > 0 && wire > 0) {
+            p.append(line("Zip", String.format("%.1fx (%s saved)", (double) raw / wire, human(raw - wire))));
         }
-        p.append(line("Now", String.format("%.2f MB/s", bps / 1_000_000.0)));
+        p.append(line("Now", String.format("%.2f MB/s wire", q.getCurrentWireBytesPerSecond() / 1_000_000.0)));
         if (mgr.isThrottled()) {
             p.append(Component.literal("TPS throttled!\n").withStyle(ChatFormatting.DARK_RED));
         }

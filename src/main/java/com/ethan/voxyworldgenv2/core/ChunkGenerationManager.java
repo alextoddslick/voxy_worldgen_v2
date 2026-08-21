@@ -210,7 +210,11 @@ public final class ChunkGenerationManager {
             // the catch-up radius is what re-sends those chunks without a second send path.
             int refreshOverride = PlayerTracker.getInstance()
                 .getRefreshRadius(player.getUUID(), dimId);
-            int radius = Math.max(baseRadius, refreshOverride);
+            // ...but never wider than the player's send distance: chunks the broadcast path
+            // refuses must not be claimable here, or they'd be marked synced and never arrive.
+            int radius = com.ethan.voxyworldgenv2.network.NetworkHandler.capCatchUpRadius(
+                Math.max(baseRadius, refreshOverride),
+                Config.getSendDistanceForPlayer(player.getUUID(), isSingleplayer()));
 
             // Never claim more than the outstanding-load ceiling allows: the batch is pre-marked
             // synced below, so anything claimed and then dropped for lack of budget would be lost.

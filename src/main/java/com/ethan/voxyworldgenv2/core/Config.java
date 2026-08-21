@@ -92,6 +92,39 @@ public final class Config {
         return DATA.maxMbpsPerPlayer;
     }
 
+    /**
+     * The bandwidth cap for one specific player: their override if an operator set one, otherwise
+     * the global/singleplayer resolution. An override of 0 means "unlimited for this player" —
+     * present-with-zero and absent are different states, which is why this is a map and not a
+     * default in disguise.
+     */
+    public static double getMaxMbpsForPlayer(java.util.UUID player, boolean isSingleplayer) {
+        var overrides = DATA.playerRateLimits;
+        if (overrides != null) {
+            Double v = overrides.get(player.toString());
+            if (v != null) return Math.max(0.0, v);
+        }
+        return getMaxMbpsPerPlayer(isSingleplayer);
+    }
+
+    /** Global LOD send distance in chunks; 0 = unlimited. */
+    public static int getSendDistanceChunks(boolean isSingleplayer) {
+        if (singleplayerActive(isSingleplayer)) {
+            return Math.max(0, DATA.singleplayer.lodSendDistanceChunks);
+        }
+        return Math.max(0, DATA.lodSendDistanceChunks);
+    }
+
+    /** Send distance for one player in chunks, override first; 0 = unlimited. */
+    public static int getSendDistanceForPlayer(java.util.UUID player, boolean isSingleplayer) {
+        var overrides = DATA.playerSendDistances;
+        if (overrides != null) {
+            Integer v = overrides.get(player.toString());
+            if (v != null) return Math.max(0, v);
+        }
+        return getSendDistanceChunks(isSingleplayer);
+    }
+
     public static int getMaxChunksPerSecond(boolean isSingleplayer) {
         if (singleplayerActive(isSingleplayer)) {
             return DATA.singleplayer.maxChunksPerSecond;
@@ -127,6 +160,10 @@ public final class Config {
         // the integrated server shares the machine with rendering, so pacing generation frees
         // CPU for frames without shrinking the radius.
         public int maxChunksPerSecond = 0;
+        // LOD send distance in chunks, 0 = unlimited. Unlike radius/tasks this defaults to the
+        // unlimited sentinel, not an auto floor: the data already exists on the local machine, so
+        // there is no egress to protect.
+        public int lodSendDistanceChunks = 0;
     }
 
     public static class ConfigData {
@@ -136,10 +173,10 @@ public final class Config {
         public int update_interval = 20; // legacy field for Compat
         public int maxQueueSize = 20000;
         public int maxActiveTasks = 20;
-        // Per-player LOD bandwidth cap in megabits/sec, applied to the RAW (pre-compression)
-        // payload size. 0 = unlimited. Default 2: with ~10x wire compression that is a gentle
-        // ~25 KB/s on the wire per player — safe for hosted servers; LAN testing can
-        // `/voxygen ratelimit off`.
+        // Per-player LOD bandwidth cap in megabits/sec, applied to the WIRE (post-deflate) bytes
+        // actually sent. 0 = unlimited. Default 2 = 250 KB/s of real traffic per player — safe
+        // for hosted servers; LAN testing can `/voxygen ratelimit off`. Per-player overrides in
+        // playerRateLimits beat this.
         public double maxMbpsPerPlayer = 2.0;
         // Worker dispatch cap in chunks/second across all players, 0 = unlimited. Paces how fast
         // the generation worker hands chunks to the chunk system; the semaphore (maxActiveTasks)
@@ -158,6 +195,20 @@ public final class Config {
         // (C2ME etc.) grinding overworld generation while the End spawn area loads can stall the
         // main thread long enough for the watchdog to kill the server. 0 disables.
         public int dimensionChangePauseSeconds = 15;
+        // How far LOD data is streamed to each player, in chunks. 256 matches the 4096-block cap
+        // that used to be hardcoded in broadcastLODData, so upgrading changes nothing by itself.
+        // 0 = unlimited.
+        public int lodSendDistanceChunks = 256;
+        // Per-player overrides, keyed by UUID string (what survives a Gson round-trip, same as
+        // headlessPlayers). An entry always beats the global/singleplayer resolution; 0 means
+        // unlimited for that player. Managed via /voxygen ratelimit|senddistance <player> ...
+        public java.util.Map<String, Double> playerRateLimits = new java.util.HashMap<>();
+        public java.util.Map<String, Integer> playerSendDistances = new java.util.HashMap<>();
+        // Which traffic stats the tab HUD and /voxygen traffic render. All on by default; these
+        // exist to let an operator declutter, not to hide the accounting.
+        public boolean hudShowCompressed = true;
+        public boolean hudShowSavings = true;
+        public boolean hudShowClientDisk = true;
         // Singleplayer specific configuration profile (maxed out defaults for integrated server)
         public SingleplayerConfig singleplayer = new SingleplayerConfig();
         // Player UUIDs who opted out of the auto-opening settings book (/voxygen headless on).

@@ -48,6 +48,8 @@ public final class VoxyGenCommand {
         root.then(op(buildQueue()));
         root.then(op(buildEnabled()));
         root.then(op(buildRateLimit()));
+        root.then(op(buildSendDistance()));
+        root.then(op(buildHud()));
         root.then(op(buildGenRate()));
         root.then(op(buildSingleplayer()));
         root.then(op(buildLogInterval()));
@@ -127,12 +129,51 @@ public final class VoxyGenCommand {
                 .executes(VoxyGenCommand::setEnabled));
     }
 
+    /**
+     * The bare number form keeps its old meaning (the global cap); a player argument scopes the
+     * cap to that player. The "mbps" node is registered before "player" so numeric input keeps
+     * parsing as the global form — only a player literally named like a number loses the show
+     * variant, and the off/reset tails still reach them.
+     */
     private static ArgumentBuilder<CommandSourceStack, ?> buildRateLimit() {
         return Commands.literal("ratelimit")
             .executes(VoxyGenCommand::showRateLimit)
             .then(Commands.literal("off").executes(ctx -> applyRateLimit(ctx, 0.0)))
             .then(Commands.argument("mbps", DoubleArgumentType.doubleArg(0.0, 1000.0))
-                .executes(ctx -> applyRateLimit(ctx, DoubleArgumentType.getDouble(ctx, "mbps"))));
+                .executes(ctx -> applyRateLimit(ctx, DoubleArgumentType.getDouble(ctx, "mbps"))))
+            .then(Commands.argument("player", EntityArgument.player())
+                .executes(VoxyGenCommand::showPlayerRateLimit)
+                .then(Commands.literal("off").executes(ctx -> applyPlayerRateLimit(ctx, 0.0)))
+                .then(Commands.literal("reset").executes(VoxyGenCommand::resetPlayerRateLimit))
+                .then(Commands.argument("mbps", DoubleArgumentType.doubleArg(0.0, 1000.0))
+                    .executes(ctx -> applyPlayerRateLimit(ctx, DoubleArgumentType.getDouble(ctx, "mbps")))));
+    }
+
+    /** Same shape as ratelimit: bare = global, player argument = per-player override. */
+    private static ArgumentBuilder<CommandSourceStack, ?> buildSendDistance() {
+        return Commands.literal("senddistance")
+            .executes(VoxyGenCommand::showSendDistance)
+            .then(Commands.literal("off").executes(ctx -> applySendDistance(ctx, 0)))
+            .then(Commands.argument("chunks", IntegerArgumentType.integer(1, 4096))
+                .executes(ctx -> applySendDistance(ctx, IntegerArgumentType.getInteger(ctx, "chunks"))))
+            .then(Commands.argument("player", EntityArgument.player())
+                .executes(VoxyGenCommand::showPlayerSendDistance)
+                .then(Commands.literal("off").executes(ctx -> applyPlayerSendDistance(ctx, 0)))
+                .then(Commands.literal("reset").executes(VoxyGenCommand::resetPlayerSendDistance))
+                .then(Commands.argument("chunks", IntegerArgumentType.integer(1, 4096))
+                    .executes(ctx -> applyPlayerSendDistance(ctx, IntegerArgumentType.getInteger(ctx, "chunks")))));
+    }
+
+    private static ArgumentBuilder<CommandSourceStack, ?> buildHud() {
+        LiteralArgumentBuilder<CommandSourceStack> hud = Commands.literal("hud")
+            .executes(VoxyGenCommand::showHudToggles);
+        for (String stat : HUD_STATS) {
+            hud.then(Commands.literal(stat)
+                .executes(ctx -> showHudToggles(ctx))
+                .then(Commands.argument("value", BoolArgumentType.bool())
+                    .executes(ctx -> setHudToggle(ctx, stat, BoolArgumentType.getBool(ctx, "value")))));
+        }
+        return hud;
     }
 
     private static ArgumentBuilder<CommandSourceStack, ?> buildLogInterval() {
@@ -223,9 +264,9 @@ public final class VoxyGenCommand {
         reply(ctx, String.format("  active tasks: %d / %d   radius: %d chunks%s",
             mgr.getActiveTaskCount(), Config.getMaxActiveTasks(sp), Config.getGenerationRadius(sp),
             sp ? " §b[Singleplayer]§r" : ""));
-        reply(ctx, String.format("  LOD sender: %s   queued %d/%d   sent %d pkt / %s",
+        reply(ctx, String.format("  LOD sender: %s   queued %d/%d   sent %d pkt / %s wire",
             q.isRunning() ? "§aalive§r" : "§cstopped§r",
-            q.getQueuedJobs(), q.getMaxQueuedJobs(), q.getPacketsSent(), humanBytes(q.getBytesSent())));
+            q.getQueuedJobs(), q.getMaxQueuedJobs(), q.getPacketsSent(), humanBytes(q.getWireBytesSent())));
 
         int dropped = q.getJobsDropped();
         if (dropped > 0) {
@@ -318,22 +359,160 @@ public final class VoxyGenCommand {
         return 1;
     }
 
+    private static final String[] HUD_STATS = {"compressed", "savings", "clientdisk"};
+
+    private static boolean getHudToggle(String stat) {
+        return switch (stat) {
+            case "compressed" -> Config.DATA.hudShowCompressed;
+            case "savings" -> Config.DATA.hudShowSavings;
+            case "clientdisk" -> Config.DATA.hudShowClientDisk;
+            default -> throw new IllegalArgumentException(stat);
+        };
+    }
+
+    private static int setHudToggle(CommandContext<CommandSourceStack> ctx, String stat, boolean value) {
+        switch (stat) {
+            case "compressed" -> Config.DATA.hudShowCompressed = value;
+            case "savings" -> Config.DATA.hudShowSavings = value;
+            case "clientdisk" -> Config.DATA.hudShowClientDisk = value;
+            default -> throw new IllegalArgumentException(stat);
+        }
+        persist();
+        reply(ctx, String.format("hud stat %s %s", stat, value ? "§ashown§r" : "§chidden§r"));
+        maybeShowBook(ctx);
+        return 1;
+    }
+
+    private static int showHudToggles(CommandContext<CommandSourceStack> ctx) {
+        reply(ctx, "§6HUD stats§r  (toggle with /voxygen hud <stat> <true|false>)");
+        reply(ctx, String.format("  compressed %s   savings %s   clientdisk %s",
+            onOff(Config.DATA.hudShowCompressed),
+            onOff(Config.DATA.hudShowSavings), onOff(Config.DATA.hudShowClientDisk)));
+        return 1;
+    }
+
+    private static String onOff(boolean v) {
+        return v ? "§aon§r" : "§coff§r";
+    }
+
+    // ---- per-player overrides ---------------------------------------------------------------
+
+    private static java.util.Map<String, Double> rateLimitOverrides() {
+        if (Config.DATA.playerRateLimits == null) Config.DATA.playerRateLimits = new java.util.HashMap<>();
+        return Config.DATA.playerRateLimits;
+    }
+
+    private static java.util.Map<String, Integer> sendDistanceOverrides() {
+        if (Config.DATA.playerSendDistances == null) Config.DATA.playerSendDistances = new java.util.HashMap<>();
+        return Config.DATA.playerSendDistances;
+    }
+
+    private static String mbpsText(double v) {
+        return v <= 0 ? "unlimited" : String.format("%.2f Mbps", v);
+    }
+
+    private static int showPlayerRateLimit(CommandContext<CommandSourceStack> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer target = EntityArgument.getPlayer(ctx, "player");
+        Double override = rateLimitOverrides().get(target.getUUID().toString());
+        double effective = Config.getMaxMbpsForPlayer(target.getUUID(), spActive());
+        reply(ctx, String.format("%s: §b%s§r%s", target.getName().getString(), mbpsText(effective),
+            override != null ? " §7(override)§r" : " §7(global)§r"));
+        return 1;
+    }
+
+    private static int applyPlayerRateLimit(CommandContext<CommandSourceStack> ctx, double mbps) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer target = EntityArgument.getPlayer(ctx, "player");
+        rateLimitOverrides().put(target.getUUID().toString(), mbps);
+        persist();
+        reply(ctx, String.format("LOD limit for %s -> §a%s§r (override; reset with /voxygen ratelimit %s reset)",
+            target.getName().getString(), mbpsText(mbps), target.getName().getString()));
+        return 1;
+    }
+
+    private static int resetPlayerRateLimit(CommandContext<CommandSourceStack> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer target = EntityArgument.getPlayer(ctx, "player");
+        Double removed = rateLimitOverrides().remove(target.getUUID().toString());
+        persist();
+        reply(ctx, removed == null
+            ? target.getName().getString() + " had no override; the global limit applies"
+            : String.format("override %s removed for %s; back to the global §b%s§r",
+                mbpsText(removed), target.getName().getString(),
+                mbpsText(Config.getMaxMbpsPerPlayer(spActive()))));
+        return 1;
+    }
+
+    private static String distanceText(int chunks) {
+        return chunks <= 0 ? "unlimited" : chunks + " chunks";
+    }
+
+    private static int showSendDistance(CommandContext<CommandSourceStack> ctx) {
+        int v = Config.getSendDistanceChunks(spActive());
+        reply(ctx, String.format("LOD send distance: §b%s§r  (set with /voxygen senddistance <chunks|off>)",
+            distanceText(v)));
+        return 1;
+    }
+
+    private static int applySendDistance(CommandContext<CommandSourceStack> ctx, int chunks) {
+        boolean sp = spActive();
+        int old = Config.getSendDistanceChunks(sp);
+        if (sp) {
+            Config.DATA.singleplayer.lodSendDistanceChunks = chunks;
+        } else {
+            Config.DATA.lodSendDistanceChunks = chunks;
+        }
+        persist();
+        reply(ctx, String.format("LOD send distance %s -> §a%s§r%s", distanceText(old),
+            distanceText(chunks), sp ? " §b(singleplayer profile)§r" : ""));
+        maybeShowBook(ctx);
+        return 1;
+    }
+
+    private static int showPlayerSendDistance(CommandContext<CommandSourceStack> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer target = EntityArgument.getPlayer(ctx, "player");
+        Integer override = sendDistanceOverrides().get(target.getUUID().toString());
+        int effective = Config.getSendDistanceForPlayer(target.getUUID(), spActive());
+        reply(ctx, String.format("%s: §b%s§r%s", target.getName().getString(), distanceText(effective),
+            override != null ? " §7(override)§r" : " §7(global)§r"));
+        return 1;
+    }
+
+    private static int applyPlayerSendDistance(CommandContext<CommandSourceStack> ctx, int chunks) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer target = EntityArgument.getPlayer(ctx, "player");
+        sendDistanceOverrides().put(target.getUUID().toString(), chunks);
+        persist();
+        reply(ctx, String.format("LOD send distance for %s -> §a%s§r (override; reset with /voxygen senddistance %s reset)",
+            target.getName().getString(), distanceText(chunks), target.getName().getString()));
+        return 1;
+    }
+
+    private static int resetPlayerSendDistance(CommandContext<CommandSourceStack> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer target = EntityArgument.getPlayer(ctx, "player");
+        Integer removed = sendDistanceOverrides().remove(target.getUUID().toString());
+        persist();
+        reply(ctx, removed == null
+            ? target.getName().getString() + " had no override; the global distance applies"
+            : String.format("override %s removed for %s; back to the global §b%s§r",
+                distanceText(removed), target.getName().getString(),
+                distanceText(Config.getSendDistanceChunks(spActive()))));
+        return 1;
+    }
+
     private static int traffic(CommandContext<CommandSourceStack> ctx) {
         var q = LodSendQueue.getInstance();
-        long bps = q.getCurrentBytesPerSecond();
 
         reply(ctx, "§6LOD traffic§r");
         long raw = NetworkHandler.RAW_SECTION_BYTES.get();
         long wire = NetworkHandler.WIRE_SECTION_BYTES.get();
-        if (wire > 0) {
-            reply(ctx, String.format("  on the wire: §b%s§r over %d packets  (was %s raw, §a%.1fx§r smaller)",
-                humanBytes(wire), q.getPacketsSent(), humanBytes(raw), raw > 0 ? (double) raw / wire : 0.0));
+        if (wire > 0 && raw > 0 && Config.DATA.hudShowSavings) {
+            reply(ctx, String.format("  on the wire: §b%s§r over %d packets  (§a%.1fx§r smaller than the source data)",
+                humanBytes(wire), q.getPacketsSent(), (double) raw / wire));
         } else {
-            reply(ctx, String.format("  total sent : §b%s§r over %d packets",
-                humanBytes(q.getBytesSent()), q.getPacketsSent()));
+            reply(ctx, String.format("  on the wire: §b%s§r over %d packets",
+                humanBytes(q.getWireBytesSent()), q.getPacketsSent()));
         }
-        reply(ctx, String.format("  now        : §b%.2f MB/s§r raw before compression  (%.2f Mbps)",
-            bps / 1_000_000.0, (bps * 8.0) / 1_000_000.0));
+        long wireBps = q.getCurrentWireBytesPerSecond();
+        reply(ctx, String.format("  now        : §b%.2f MB/s§r on the wire  (%.2f Mbps)",
+            wireBps / 1_000_000.0, (wireBps * 8.0) / 1_000_000.0));
         boolean sp = ChunkGenerationManager.getInstance().isSingleplayer();
         double limit = Config.getMaxMbpsPerPlayer(sp);
         reply(ctx, String.format("  limit      : %s",
@@ -343,20 +522,29 @@ public final class VoxyGenCommand {
             q.getQueuedJobs(), q.getMaxQueuedJobs(), q.getJobsDropped(),
             q.getThrottleWaitMillis() / 1000.0));
 
-        var per = q.getPerPlayerBytes();
-        if (per.isEmpty()) {
+        var perWire = q.getPerPlayerWireBytes();
+        if (perWire.isEmpty()) {
             reply(ctx, "  no per-player traffic yet");
             return 1;
         }
+        var c = Config.DATA;
         reply(ctx, "  per player:");
         var server = ctx.getSource().getServer();
-        per.entrySet().stream()
+        perWire.entrySet().stream()
             .sorted((a, b) -> Long.compare(b.getValue(), a.getValue()))
             .limit(10)
             .forEach(e -> {
                 var p = server.getPlayerList().getPlayer(e.getKey());
                 String name = p != null ? p.getName().getString() : e.getKey().toString().substring(0, 8) + " (gone)";
-                reply(ctx, String.format("    %-18s §b%s§r", name, humanBytes(e.getValue())));
+                StringBuilder line = new StringBuilder(String.format("    %-18s", name));
+                if (c.hudShowCompressed) line.append(String.format(" §b%s§r wire", humanBytes(e.getValue())));
+                long disk = PlayerTracker.getInstance().getClientStoreBytes(e.getKey());
+                if (c.hudShowClientDisk && disk >= 0) line.append(String.format("  §3%s on disk§r", humanBytes(disk)));
+                Double rl = c.playerRateLimits != null ? c.playerRateLimits.get(e.getKey().toString()) : null;
+                if (rl != null) line.append(rl <= 0 ? "  §7[uncapped]§r" : String.format("  §7[cap %.1f Mbps]§r", rl));
+                Integer sd = c.playerSendDistances != null ? c.playerSendDistances.get(e.getKey().toString()) : null;
+                if (sd != null) line.append(sd <= 0 ? "  §7[dist ∞]§r" : String.format("  §7[dist %d]§r", sd));
+                reply(ctx, line.toString());
             });
         return 1;
     }
@@ -441,7 +629,13 @@ public final class VoxyGenCommand {
 
     private static int settings(CommandContext<CommandSourceStack> ctx) {
         if (ctx.getSource().getEntity() instanceof ServerPlayer player) {
-            SettingsBook.open(player);
+            // A client that acked protocol 4 has the real settings screen; everyone else keeps
+            // the written-book fallback.
+            if (PlayerTracker.getInstance().getClientProtocol(player.getUUID()) >= 4) {
+                NetworkHandler.sendSettingsSnapshot(player);
+            } else {
+                SettingsBook.open(player);
+            }
         } else {
             // console/RCON has no screen; print the same information as text
             status(ctx);
@@ -451,10 +645,12 @@ public final class VoxyGenCommand {
 
     /**
      * In-game sources get the settings book re-opened so the change is visible immediately —
-     * unless the player opted out with {@code /voxygen headless on}.
+     * unless the player opted out with {@code /voxygen headless on}, or their client has the
+     * settings screen (a book popping over it would be noise; the chat reply suffices).
      */
     private static void maybeShowBook(CommandContext<CommandSourceStack> ctx) {
-        if (ctx.getSource().getEntity() instanceof ServerPlayer player && !isHeadless(player)) {
+        if (ctx.getSource().getEntity() instanceof ServerPlayer player && !isHeadless(player)
+                && PlayerTracker.getInstance().getClientProtocol(player.getUUID()) < 4) {
             SettingsBook.open(player);
         }
     }

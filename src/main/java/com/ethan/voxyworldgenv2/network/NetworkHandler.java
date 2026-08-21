@@ -27,13 +27,18 @@ public class NetworkHandler {
     public static final ResourceLocation HANDSHAKE_ID = ResourceLocation.parse(VoxyWorldGenV2.MOD_ID + ":handshake");
     public static final ResourceLocation LOD_DATA_ID = ResourceLocation.parse(VoxyWorldGenV2.MOD_ID + ":lod_data");
     public static final ResourceLocation KNOWN_CHUNKS_ID = ResourceLocation.parse(VoxyWorldGenV2.MOD_ID + ":known_chunks");
+    public static final ResourceLocation STORAGE_REPORT_ID = ResourceLocation.parse(VoxyWorldGenV2.MOD_ID + ":storage_report");
+    public static final ResourceLocation HANDSHAKE_ACK_ID = ResourceLocation.parse(VoxyWorldGenV2.MOD_ID + ":handshake_ack");
+    public static final ResourceLocation SETTINGS_SNAPSHOT_ID = ResourceLocation.parse(VoxyWorldGenV2.MOD_ID + ":settings_snapshot");
+    public static final ResourceLocation SETTINGS_UPDATE_ID = ResourceLocation.parse(VoxyWorldGenV2.MOD_ID + ":settings_update");
 
     /**
-     * Bumped whenever the payload wire format changes. The client refuses to upload its known-chunk
-     * set unless the server advertises at least 2, because sending a payload a server has not
-     * registered can drop the connection.
+     * Bumped whenever a payload is added or its wire format changes. Serverbound payloads are
+     * gated on the version the server advertises (known-chunks needs ≥2, the storage report ≥3,
+     * the settings screen ≥4), because sending a payload a server has not registered can drop the
+     * connection.
      */
-    public static final int PROTOCOL_VERSION = 2;
+    public static final int PROTOCOL_VERSION = 4;
 
     // Keep individual packets well under the protocol ceiling to prevent connection resets on
     // public servers. The binding limit for a clientbound custom payload in 1.21.1 is
@@ -72,12 +77,25 @@ public class NetworkHandler {
     /** Deflated section bytes actually put on the wire; server-side only. */
     public static final java.util.concurrent.atomic.AtomicLong WIRE_SECTION_BYTES = new java.util.concurrent.atomic.AtomicLong();
 
-    public record LODDataPayload(ResourceKey<Level> dimension, ChunkPos pos, int minY, List<SectionData> sections) implements CustomPacketPayload {
+    /**
+     * Carries one chunk's section batch, deflated as a single unit. Terrain data is highly
+     * repetitive (palettes, runs of the same state, near-identical light arrays), so a whole-batch
+     * zlib window typically shrinks it 3-6x — measured via RAW/WIRE_SECTION_BYTES.
+     *
+     * <p>Compression happens ONCE, in {@link #of} on the sender thread, not at netty encode time.
+     * The payload then knows its own network size before it is sent, which is what lets the send
+     * queue throttle and account per player in real wire bytes rather than raw bytes. The wire
+     * format is byte-identical to when the Deflater ran inside {@code write}, so this carries no
+     * protocol bump. Section bytes need no registry context (they are already-serialised arrays),
+     * which is why the codec runs on plain {@link FriendlyByteBuf}.
+     */
+    public record LODDataPayload(ResourceKey<Level> dimension, ChunkPos pos, int minY,
+                                 int plainLength, byte[] body) implements CustomPacketPayload {
         public static final Type<LODDataPayload> TYPE = new Type<>(LOD_DATA_ID);
-        public static final StreamCodec<RegistryFriendlyByteBuf, LODDataPayload> CODEC = CustomPacketPayload.codec(LODDataPayload::write, LODDataPayload::new);
+        public static final StreamCodec<FriendlyByteBuf, LODDataPayload> CODEC = CustomPacketPayload.codec(LODDataPayload::write, LODDataPayload::new);
 
         public record SectionData(int y, byte[] states, byte[] biomes, byte[] blockLight, byte[] skyLight) {
-            public void write(RegistryFriendlyByteBuf buf) {
+            public void write(FriendlyByteBuf buf) {
                 buf.writeInt(y);
                 buf.writeByteArray(states);
                 buf.writeByteArray(biomes);
@@ -85,7 +103,7 @@ public class NetworkHandler {
                 buf.writeNullable(skyLight, (b, a) -> b.writeByteArray(a));
             }
 
-            public static SectionData read(RegistryFriendlyByteBuf buf) {
+            public static SectionData read(FriendlyByteBuf buf) {
                 return new SectionData(
                     buf.readInt(),
                     buf.readByteArray(),
@@ -96,67 +114,66 @@ public class NetworkHandler {
             }
         }
 
-        public LODDataPayload(RegistryFriendlyByteBuf buf) {
+        /** Serialises and deflates the batch on the calling (sender) thread. */
+        public static LODDataPayload of(ResourceKey<Level> dimension, ChunkPos pos, int minY,
+                                        List<SectionData> sections) {
+            io.netty.buffer.ByteBuf raw = io.netty.buffer.Unpooled.buffer();
+            byte[] plain;
+            try {
+                FriendlyByteBuf inner = new FriendlyByteBuf(raw);
+                inner.writeCollection(sections, (b, s) -> s.write((FriendlyByteBuf) b));
+                plain = new byte[inner.readableBytes()];
+                inner.readBytes(plain);
+            } finally {
+                raw.release();
+            }
+
+            java.util.zip.Deflater deflater = new java.util.zip.Deflater(java.util.zip.Deflater.DEFAULT_COMPRESSION);
+            byte[] out = new byte[plain.length + 64];
+            int packed;
+            try {
+                deflater.setInput(plain);
+                deflater.finish();
+                packed = deflater.deflate(out);
+                // Incompressible data can exceed the buffer; fall back to stored bytes.
+                if (!deflater.finished()) packed = 0;
+            } finally {
+                deflater.end();
+            }
+
+            byte[] body = (packed > 0 && packed < plain.length)
+                ? java.util.Arrays.copyOf(out, packed)
+                : plain;
+            RAW_SECTION_BYTES.addAndGet(plain.length);
+            WIRE_SECTION_BYTES.addAndGet(body.length);
+            return new LODDataPayload(dimension, pos, minY, plain.length, body);
+        }
+
+        public LODDataPayload(FriendlyByteBuf buf) {
             this(
                 ResourceKey.create(Registries.DIMENSION, ResourceLocation.parse(buf.readUtf())),
                 buf.readChunkPos(),
                 buf.readInt(),
-                readCompressedSections(buf)
+                buf.readVarInt(),
+                buf.readByteArray()
             );
         }
 
-        public void write(RegistryFriendlyByteBuf buf) {
+        public void write(FriendlyByteBuf buf) {
             buf.writeUtf(dimension.location().toString());
             buf.writeChunkPos(pos);
             buf.writeInt(minY);
-            writeCompressedSections(buf, sections);
+            buf.writeVarInt(plainLength);
+            buf.writeByteArray(body);
         }
 
-        /**
-         * The section block is deflated as one unit. Terrain data is highly repetitive
-         * (palettes, runs of the same state, near-identical light arrays), so a whole-batch
-         * zlib window typically shrinks it 3-6x — far better than the connection's per-packet
-         * compression alone manages, and measured explicitly via RAW/WIRE_SECTION_BYTES.
-         */
-        private static void writeCompressedSections(RegistryFriendlyByteBuf buf, List<SectionData> sections) {
-            io.netty.buffer.ByteBuf raw = io.netty.buffer.Unpooled.buffer();
-            try {
-                RegistryFriendlyByteBuf inner = new RegistryFriendlyByteBuf(new FriendlyByteBuf(raw), buf.registryAccess());
-                inner.writeCollection(sections, (b, s) -> s.write((RegistryFriendlyByteBuf) b));
-                byte[] plain = new byte[inner.readableBytes()];
-                inner.readBytes(plain);
-
-                java.util.zip.Deflater deflater = new java.util.zip.Deflater(java.util.zip.Deflater.DEFAULT_COMPRESSION);
-                byte[] out = new byte[plain.length + 64];
-                int packed;
-                try {
-                    deflater.setInput(plain);
-                    deflater.finish();
-                    packed = deflater.deflate(out);
-                    // Incompressible data can exceed the buffer; fall back to stored bytes.
-                    if (!deflater.finished()) packed = 0;
-                } finally {
-                    deflater.end();
-                }
-
-                buf.writeVarInt(plain.length);
-                if (packed > 0 && packed < plain.length) {
-                    buf.writeByteArray(java.util.Arrays.copyOf(out, packed));
-                    WIRE_SECTION_BYTES.addAndGet(packed);
-                } else {
-                    buf.writeByteArray(plain);
-                    WIRE_SECTION_BYTES.addAndGet(plain.length);
-                }
-                RAW_SECTION_BYTES.addAndGet(plain.length);
-            } finally {
-                raw.release();
-            }
+        /** The section body's network size; the header alongside it is a few dozen bytes. */
+        public int wireSize() {
+            return body.length;
         }
 
-        private static List<SectionData> readCompressedSections(RegistryFriendlyByteBuf buf) {
-            int plainLength = buf.readVarInt();
-            byte[] body = buf.readByteArray();
-
+        /** Inflates and parses the batch; the client calls this once on receipt. */
+        public List<SectionData> decodeSections() {
             byte[] plain;
             if (body.length == plainLength) {
                 plain = body; // stored uncompressed (incompressible fallback)
@@ -176,8 +193,8 @@ public class NetworkHandler {
 
             io.netty.buffer.ByteBuf raw = io.netty.buffer.Unpooled.wrappedBuffer(plain);
             try {
-                RegistryFriendlyByteBuf inner = new RegistryFriendlyByteBuf(new FriendlyByteBuf(raw), buf.registryAccess());
-                return inner.readCollection(ArrayList::new, b -> SectionData.read((RegistryFriendlyByteBuf) b));
+                FriendlyByteBuf inner = new FriendlyByteBuf(raw);
+                return inner.readCollection(ArrayList::new, b -> SectionData.read((FriendlyByteBuf) b));
             } finally {
                 raw.release();
             }
@@ -218,17 +235,319 @@ public class NetworkHandler {
         }
     }
 
+    /**
+     * The client's report of how much disk Voxy's store for this world occupies. Purely
+     * informational (surfaces in the tab HUD and /voxygen traffic); a lying client can only
+     * misreport its own line.
+     */
+    public record StorageReportPayload(long bytesOnDisk) implements CustomPacketPayload {
+        public static final Type<StorageReportPayload> TYPE = new Type<>(STORAGE_REPORT_ID);
+        public static final StreamCodec<FriendlyByteBuf, StorageReportPayload> CODEC =
+            CustomPacketPayload.codec(StorageReportPayload::write, StorageReportPayload::new);
+
+        public StorageReportPayload(FriendlyByteBuf buf) {
+            this(buf.readLong());
+        }
+
+        public void write(FriendlyByteBuf buf) {
+            buf.writeLong(bytesOnDisk);
+        }
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
+    /**
+     * The client's reply to the handshake: "I run protocol N too." What the server learns from it
+     * is which UI it may offer — a client at ≥4 gets the settings screen from /voxygen settings, a
+     * silent client keeps the written-book fallback forever.
+     */
+    public record HandshakeAckPayload(int clientProtocol) implements CustomPacketPayload {
+        public static final Type<HandshakeAckPayload> TYPE = new Type<>(HANDSHAKE_ACK_ID);
+        public static final StreamCodec<FriendlyByteBuf, HandshakeAckPayload> CODEC =
+            CustomPacketPayload.codec(HandshakeAckPayload::write, HandshakeAckPayload::new);
+
+        public HandshakeAckPayload(FriendlyByteBuf buf) {
+            this(buf.readVarInt());
+        }
+
+        public void write(FriendlyByteBuf buf) {
+            buf.writeVarInt(clientProtocol);
+        }
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
+    /**
+     * Everything the settings screen renders, in one S2C payload: the editable values (already
+     * resolved to the profile the commands would edit), the HUD toggles, a live-stats strip, and —
+     * for ops only — the player table. Sent on /voxygen settings and again after every applied
+     * update, so the screen never has to guess at server state.
+     */
+    public record SettingsSnapshotPayload(
+        boolean isOp, boolean singleplayerActive,
+        boolean enabled, int generationRadius, int maxActiveTasks, int maxChunksPerSecond,
+        double maxMbpsPerPlayer, int lodSendDistanceChunks,
+        boolean hudCompressed, boolean hudSavings, boolean hudClientDisk,
+        long wireBytesSent, long wireBps, int zipRatioX10,
+        int queued, int maxQueued, long chunksDone,
+        List<PlayerRow> players
+    ) implements CustomPacketPayload {
+        public static final Type<SettingsSnapshotPayload> TYPE = new Type<>(SETTINGS_SNAPSHOT_ID);
+        public static final StreamCodec<FriendlyByteBuf, SettingsSnapshotPayload> CODEC =
+            CustomPacketPayload.codec(SettingsSnapshotPayload::write, SettingsSnapshotPayload::new);
+
+        /** One admin-table row. diskBytes -1 = never reported; hasCap/hasDist mark overrides. */
+        public record PlayerRow(java.util.UUID uuid, String name, boolean online, long lastSeenMs,
+                                long wireBytes, long diskBytes,
+                                boolean hasCap, double capMbps,
+                                boolean hasDist, int distChunks) {
+            void write(FriendlyByteBuf buf) {
+                buf.writeUUID(uuid);
+                buf.writeUtf(name, 64);
+                buf.writeBoolean(online);
+                buf.writeLong(lastSeenMs);
+                buf.writeLong(wireBytes);
+                buf.writeLong(diskBytes);
+                buf.writeBoolean(hasCap);
+                buf.writeDouble(capMbps);
+                buf.writeBoolean(hasDist);
+                buf.writeVarInt(distChunks);
+            }
+
+            static PlayerRow read(FriendlyByteBuf buf) {
+                return new PlayerRow(buf.readUUID(), buf.readUtf(64), buf.readBoolean(),
+                    buf.readLong(), buf.readLong(), buf.readLong(),
+                    buf.readBoolean(), buf.readDouble(), buf.readBoolean(), buf.readVarInt());
+            }
+        }
+
+        public SettingsSnapshotPayload(FriendlyByteBuf buf) {
+            this(buf.readBoolean(), buf.readBoolean(),
+                buf.readBoolean(), buf.readVarInt(), buf.readVarInt(), buf.readVarInt(),
+                buf.readDouble(), buf.readVarInt(),
+                buf.readBoolean(), buf.readBoolean(), buf.readBoolean(),
+                buf.readLong(), buf.readLong(), buf.readVarInt(),
+                buf.readVarInt(), buf.readVarInt(), buf.readLong(),
+                buf.readCollection(ArrayList::new, PlayerRow::read));
+        }
+
+        public void write(FriendlyByteBuf buf) {
+            buf.writeBoolean(isOp);
+            buf.writeBoolean(singleplayerActive);
+            buf.writeBoolean(enabled);
+            buf.writeVarInt(generationRadius);
+            buf.writeVarInt(maxActiveTasks);
+            buf.writeVarInt(maxChunksPerSecond);
+            buf.writeDouble(maxMbpsPerPlayer);
+            buf.writeVarInt(lodSendDistanceChunks);
+            buf.writeBoolean(hudCompressed);
+            buf.writeBoolean(hudSavings);
+            buf.writeBoolean(hudClientDisk);
+            buf.writeLong(wireBytesSent);
+            buf.writeLong(wireBps);
+            buf.writeVarInt(zipRatioX10);
+            buf.writeVarInt(queued);
+            buf.writeVarInt(maxQueued);
+            buf.writeLong(chunksDone);
+            buf.writeCollection(players, (b, r) -> r.write((FriendlyByteBuf) b));
+        }
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
+    /**
+     * The screen's edits going back: string-keyed ops that {@code SettingsApplier} gives the same
+     * semantics and clamps as the /voxygen commands. Bounded hard at read time — the op check
+     * happens later, so the codec itself must not let an unauthenticated packet allocate freely.
+     */
+    public record SettingsUpdatePayload(List<Op> ops) implements CustomPacketPayload {
+        public static final Type<SettingsUpdatePayload> TYPE = new Type<>(SETTINGS_UPDATE_ID);
+        public static final StreamCodec<FriendlyByteBuf, SettingsUpdatePayload> CODEC =
+            CustomPacketPayload.codec(SettingsUpdatePayload::write, SettingsUpdatePayload::new);
+
+        public static final int MAX_OPS = 64;
+
+        public record Op(String key, String value) {
+            void write(FriendlyByteBuf buf) {
+                buf.writeUtf(key, 96);
+                buf.writeUtf(value, 64);
+            }
+
+            static Op read(FriendlyByteBuf buf) {
+                return new Op(buf.readUtf(96), buf.readUtf(64));
+            }
+        }
+
+        public SettingsUpdatePayload(FriendlyByteBuf buf) {
+            this(readOps(buf));
+        }
+
+        private static List<Op> readOps(FriendlyByteBuf buf) {
+            int count = buf.readVarInt();
+            if (count < 0 || count > MAX_OPS) {
+                throw new io.netty.handler.codec.DecoderException("settings update too large: " + count);
+            }
+            List<Op> ops = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) ops.add(Op.read(buf));
+            return ops;
+        }
+
+        public void write(FriendlyByteBuf buf) {
+            buf.writeVarInt(ops.size());
+            for (Op op : ops) op.write(buf);
+        }
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
     public static void init() {
         PayloadTypeRegistry.playC2S().register(HandshakePayload.TYPE, HandshakePayload.CODEC);
         PayloadTypeRegistry.playS2C().register(HandshakePayload.TYPE, HandshakePayload.CODEC);
 
         PayloadTypeRegistry.playS2C().register(LODDataPayload.TYPE, LODDataPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(KnownChunksPayload.TYPE, KnownChunksPayload.CODEC);
+        PayloadTypeRegistry.playC2S().register(StorageReportPayload.TYPE, StorageReportPayload.CODEC);
+        PayloadTypeRegistry.playC2S().register(HandshakeAckPayload.TYPE, HandshakeAckPayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(SettingsSnapshotPayload.TYPE, SettingsSnapshotPayload.CODEC);
+        PayloadTypeRegistry.playC2S().register(SettingsUpdatePayload.TYPE, SettingsUpdatePayload.CODEC);
 
         ServerPlayNetworking.registerGlobalReceiver(KnownChunksPayload.TYPE,
             (payload, context) -> receiveKnownChunks(context.player(), payload));
+        ServerPlayNetworking.registerGlobalReceiver(StorageReportPayload.TYPE,
+            (payload, context) -> receiveStorageReport(context.player(), payload));
+        ServerPlayNetworking.registerGlobalReceiver(HandshakeAckPayload.TYPE,
+            (payload, context) -> PlayerTracker.getInstance()
+                .setClientProtocol(context.player().getUUID(), payload.clientProtocol()));
+        ServerPlayNetworking.registerGlobalReceiver(SettingsUpdatePayload.TYPE,
+            (payload, context) -> receiveSettingsUpdate(context.player(), payload));
 
         VoxyWorldGenV2.LOGGER.info("voxy networking initialized (protocol {})", PROTOCOL_VERSION);
+    }
+
+    /**
+     * Applies a settings-screen batch. The permission check happens HERE, per packet — the screen
+     * being open proves nothing, and a deopped player's stale screen must turn into a no-op, not
+     * an edit. A fresh snapshot goes back either way so the screen re-renders truth.
+     */
+    private static void receiveSettingsUpdate(ServerPlayer player, SettingsUpdatePayload payload) {
+        if (!player.hasPermissions(2)) {
+            VoxyWorldGenV2.LOGGER.warn("ignoring settings update from non-op {}", player.getName().getString());
+            sendSettingsSnapshot(player);
+            return;
+        }
+
+        boolean spActive = com.ethan.voxyworldgenv2.core.ChunkGenerationManager.getInstance().isSingleplayer()
+            && com.ethan.voxyworldgenv2.core.Config.DATA.singleplayer != null
+            && com.ethan.voxyworldgenv2.core.Config.DATA.singleplayer.enableSingleplayerDefaults;
+
+        var ops = payload.ops().stream()
+            .map(op -> new com.ethan.voxyworldgenv2.core.SettingsApplier.Op(op.key(), op.value()))
+            .toList();
+        int applied = com.ethan.voxyworldgenv2.core.SettingsApplier.apply(ops, spActive);
+        if (applied > 0) {
+            com.ethan.voxyworldgenv2.core.Config.save();
+            com.ethan.voxyworldgenv2.core.ChunkGenerationManager.getInstance().scheduleConfigReload();
+            VoxyWorldGenV2.LOGGER.info("{} applied {} settings change(s) via the settings screen",
+                player.getName().getString(), applied);
+        }
+        sendSettingsSnapshot(player);
+    }
+
+    /** Builds and sends the settings screen's state; the player table only goes to ops. */
+    public static void sendSettingsSnapshot(ServerPlayer player) {
+        var mgr = com.ethan.voxyworldgenv2.core.ChunkGenerationManager.getInstance();
+        var c = com.ethan.voxyworldgenv2.core.Config.DATA;
+        var q = LodSendQueue.getInstance();
+        boolean sp = mgr.isSingleplayer();
+        boolean spActive = sp && c.singleplayer != null && c.singleplayer.enableSingleplayerDefaults;
+        boolean isOp = player.hasPermissions(2);
+
+        long raw = RAW_SECTION_BYTES.get();
+        long wire = WIRE_SECTION_BYTES.get();
+        int zipX10 = (raw > 0 && wire > 0) ? (int) Math.round(raw * 10.0 / wire) : 0;
+
+        ServerPlayNetworking.send(player, new SettingsSnapshotPayload(
+            isOp, spActive,
+            c.enabled,
+            com.ethan.voxyworldgenv2.core.Config.getGenerationRadius(sp),
+            com.ethan.voxyworldgenv2.core.Config.getMaxActiveTasks(sp),
+            com.ethan.voxyworldgenv2.core.Config.getMaxChunksPerSecond(sp),
+            com.ethan.voxyworldgenv2.core.Config.getMaxMbpsPerPlayer(sp),
+            com.ethan.voxyworldgenv2.core.Config.getSendDistanceChunks(sp),
+            c.hudShowCompressed, c.hudShowSavings, c.hudShowClientDisk,
+            q.getWireBytesSent(), q.getCurrentWireBytesPerSecond(), zipX10,
+            q.getQueuedJobs(), q.getMaxQueuedJobs(),
+            mgr.getStats().getCompleted(),
+            isOp ? buildPlayerRows() : List.of()));
+    }
+
+    /**
+     * The admin table: every player the history knows, refreshed from live counters first so
+     * online rows are current. Sorted online-first then most-recently-seen; capped well under the
+     * payload ceiling.
+     */
+    private static List<SettingsSnapshotPayload.PlayerRow> buildPlayerRows() {
+        var tracker = PlayerTracker.getInstance();
+        var history = com.ethan.voxyworldgenv2.core.PlayerHistory.getInstance();
+        var q = LodSendQueue.getInstance();
+        long now = System.currentTimeMillis();
+
+        // Flush-on-read: fold each online player's live counters into the history so the table
+        // reads uniformly from one source.
+        var wireByPlayer = q.getPerPlayerWireBytes();
+        java.util.Set<String> online = new java.util.HashSet<>();
+        for (ServerPlayer p : tracker.getPlayers()) {
+            online.add(p.getUUID().toString());
+            history.recordSession(p.getUUID(), p.getName().getString(),
+                wireByPlayer.getOrDefault(p.getUUID(), 0L),
+                tracker.getClientStoreBytes(p.getUUID()), now);
+        }
+
+        var c = com.ethan.voxyworldgenv2.core.Config.DATA;
+        List<SettingsSnapshotPayload.PlayerRow> rows = new ArrayList<>();
+        for (var entry : history.entries().entrySet()) {
+            java.util.UUID uuid;
+            try {
+                uuid = java.util.UUID.fromString(entry.getKey());
+            } catch (IllegalArgumentException e) {
+                continue; // a hand-edited history line must not break the screen
+            }
+            var h = entry.getValue();
+            Double cap = c.playerRateLimits != null ? c.playerRateLimits.get(entry.getKey()) : null;
+            Integer dist = c.playerSendDistances != null ? c.playerSendDistances.get(entry.getKey()) : null;
+            rows.add(new SettingsSnapshotPayload.PlayerRow(
+                uuid, h.name, online.contains(entry.getKey()), h.lastSeenMs,
+                h.wireBytes, h.diskBytes,
+                cap != null, cap != null ? cap : 0.0,
+                dist != null, dist != null ? dist : 0));
+        }
+        rows.sort(java.util.Comparator
+            .comparing((SettingsSnapshotPayload.PlayerRow r) -> !r.online())
+            .thenComparing(SettingsSnapshotPayload.PlayerRow::lastSeenMs, java.util.Comparator.reverseOrder()));
+        return rows.size() > 100 ? rows.subList(0, 100) : rows;
+    }
+
+    /**
+     * Stores the client's disk-usage figure. A negative count is a malformed or hostile packet,
+     * not a value; it is dropped rather than clamped so it can never render as "0 B" and read as
+     * truth. Arrival rate is bounded in PlayerTracker because the packet is otherwise free to
+     * spam — the cost of a false rejection is one stale HUD line for a minute.
+     */
+    private static void receiveStorageReport(ServerPlayer player, StorageReportPayload payload) {
+        if (payload.bytesOnDisk() < 0) return;
+        PlayerTracker.getInstance().reportClientStoreBytes(player.getUUID(), payload.bytesOnDisk());
     }
 
     /**
@@ -316,6 +635,25 @@ public class NetworkHandler {
             .isGated(player.getUUID(), PlayerTracker.dimensionId(dimension));
     }
 
+    /**
+     * True when a chunk {@code (dxBlocks, dzBlocks)} away from the player is inside their LOD send
+     * distance. 0 chunks = unlimited (the config sentinel).
+     */
+    public static boolean withinSendDistance(double dxBlocks, double dzBlocks, int sendDistanceChunks) {
+        if (sendDistanceChunks <= 0) return true;
+        double maxDist = sendDistanceChunks * 16.0;
+        return dxBlocks * dxBlocks + dzBlocks * dzBlocks <= maxDist * maxDist;
+    }
+
+    /**
+     * Bounds a catch-up/refresh sweep radius by the send distance: chunks the broadcast path would
+     * refuse must not be claimable by the sweep either, or they'd be marked synced and never sent.
+     */
+    public static int capCatchUpRadius(int desiredRadius, int sendDistanceChunks) {
+        if (sendDistanceChunks <= 0) return desiredRadius;
+        return Math.min(desiredRadius, sendDistanceChunks);
+    }
+
     public static void broadcastLODData(LevelChunk chunk) {
         ChunkPos pos = chunk.getPos();
         int minY = chunk.getMinSection();
@@ -323,15 +661,17 @@ public class NetworkHandler {
 
         if (sections.isEmpty()) return;
 
-        double maxDistSq = 4096.0 * 4096.0;
+        boolean sp = com.ethan.voxyworldgenv2.core.ChunkGenerationManager.getInstance().isSingleplayer();
         var registryAccess = chunk.getLevel().registryAccess();
         var dimension = chunk.getLevel().dimension();
 
         for (ServerPlayer player : PlayerTracker.getInstance().getPlayers()) {
             double dx = player.getX() - (pos.getMiddleBlockX());
             double dz = player.getZ() - (pos.getMiddleBlockZ());
+            int sendDistance = com.ethan.voxyworldgenv2.core.Config
+                .getSendDistanceForPlayer(player.getUUID(), sp);
 
-            if (player.level() != chunk.getLevel() || (dx * dx + dz * dz > maxDistSq)) {
+            if (player.level() != chunk.getLevel() || !withinSendDistance(dx, dz, sendDistance)) {
                 setSyncedState(player, dimension, pos, false);
                 continue;
             }

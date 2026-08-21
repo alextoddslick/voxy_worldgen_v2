@@ -23,12 +23,31 @@ public class NetworkClientHandler {
             context.client().execute(() -> {
                 NetworkState.setServerConnected(serverHasMod);
                 NetworkState.setServerProtocol(protocol);
+                // Ack so the server knows this client can show the settings screen. Gated on the
+                // server's own version: a pre-4 server has not registered the payload and an
+                // unknown serverbound channel can drop the connection.
+                if (protocol >= 4 && ClientPlayNetworking.canSend(NetworkHandler.HandshakeAckPayload.TYPE)) {
+                    ClientPlayNetworking.send(new NetworkHandler.HandshakeAckPayload(NetworkHandler.PROTOCOL_VERSION));
+                }
             });
         });
 
         ClientPlayNetworking.registerGlobalReceiver(NetworkHandler.LODDataPayload.TYPE, (payload, context) -> {
             context.client().execute(() -> {
                 handleLODData(payload);
+            });
+        });
+
+        ClientPlayNetworking.registerGlobalReceiver(NetworkHandler.SettingsSnapshotPayload.TYPE, (payload, context) -> {
+            context.client().execute(() -> {
+                var mc = context.client();
+                // A snapshot either opens the screen or refreshes the one already showing (the
+                // server sends a fresh one after every applied update).
+                if (mc.screen instanceof com.ethan.voxyworldgenv2.client.VoxyWorldGenSettingsScreen screen) {
+                    screen.refresh(payload);
+                } else {
+                    mc.setScreen(new com.ethan.voxyworldgenv2.client.VoxyWorldGenSettingsScreen(payload));
+                }
             });
         });
     }
@@ -40,22 +59,26 @@ public class NetworkClientHandler {
 
         // discard LOD data from a different dimension to prevent cross-dimension rendering artifacts (issue #43)
         if (!level.dimension().equals(payload.dimension())) return;
-        
-        // calculate approximate payload size
-        long bytes = 0;
-        for (NetworkHandler.LODDataPayload.SectionData sd : payload.sections()) {
-            bytes += sd.states().length;
-            bytes += sd.biomes().length;
-            if (sd.blockLight() != null) bytes += sd.blockLight().length;
-            if (sd.skyLight() != null) bytes += sd.skyLight().length;
+
+        // Wire bytes, not decompressed bytes: the "received" figure must agree with what the
+        // server's per-player accounting (and the player's actual connection) saw.
+        NetworkState.incrementReceived(payload.wireSize());
+
+        java.util.List<NetworkHandler.LODDataPayload.SectionData> sections;
+        try {
+            sections = payload.decodeSections();
+        } catch (Exception e) {
+            // Decode used to happen inside the netty pipeline; now that it runs here, a corrupt
+            // body must not escape onto the client main thread.
+            VoxyWorldGenV2.LOGGER.error("discarding undecodable LOD data for chunk " + payload.pos(), e);
+            return;
         }
-        NetworkState.incrementReceived(bytes);
 
         // LodMemory/RegionBitmask track presence per chunk column, not per section, so there is
         // no way to represent "half of this chunk is in Voxy" -- it is all-or-nothing. A payload
         // with no sections is never recorded as known.
-        boolean allIngested = !payload.sections().isEmpty();
-        for (NetworkHandler.LODDataPayload.SectionData sectionData : payload.sections()) {
+        boolean allIngested = !sections.isEmpty();
+        for (NetworkHandler.LODDataPayload.SectionData sectionData : sections) {
             io.netty.buffer.ByteBuf statesRaw = io.netty.buffer.Unpooled.wrappedBuffer(sectionData.states());
             io.netty.buffer.ByteBuf biomesRaw = io.netty.buffer.Unpooled.wrappedBuffer(sectionData.biomes());
             try {
