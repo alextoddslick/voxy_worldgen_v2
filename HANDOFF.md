@@ -104,8 +104,8 @@ from there himself.
 JAVA_HOME=/opt/homebrew/opt/openjdk@25 ./gradlew :fabric:build
 cp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.5.2.jar" ~/Downloads/
 cp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.5.2.jar" ~/Downloads/voxy-server-mods/
-scp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.5.2.jar" xps@192.168.1.23:~/mc/voxy/mods/
-ssh xps@192.168.1.23 '~/mc-ctl stop && ~/mc-ctl start'
+scp "fabric/build/libs/Voxy World Gen V2-fabric-26.2-2.5.2.jar" razer@192.168.1.29:'Documents/minecraft/voxy/mods/'
+ssh razer@192.168.1.29 '~/voxy-ctl stop && ~/voxy-ctl start'
 md5 -q ~/Downloads/"Voxy World Gen V2-fabric-26.2-2.5.2.jar"
 ```
 
@@ -142,8 +142,18 @@ directory `srcDir`-merged into **two** modules compiled against **different Mine
 The fork's server code uses 26.2-only APIs (`src.permissions().hasPermission(...)`,
 `ClickEvent.RunCommand`, `getSelectedSlot()`, `chunkPosition().x()`), so it cannot live there.
 **NeoForge is not a target** — per Alex, he does not care about it. Putting the fork's code in
-`fabric/src/main/java` satisfies that with less work than the alternatives and keeps `:neoforge`
-compiling for free rather than knowingly breaking it.
+`fabric/src/main/java` satisfies that with less work than the alternatives.
+
+**Stale claim, corrected 2026-08-21: `:neoforge` does NOT keep compiling for free.** It just needed
+two independent fixes to actually build: `neoforge/.../NetworkHandler.java`'s
+`getSyncedChunks(UUID)` call site was never updated when `PlayerTracker` became dimension-keyed
+(`(UUID, ResourceKey<Level>)`), and `common/`'s `ChunkGenerationManager.cleanupTask` calls
+`(MinecraftServerAccess) srv).setEmptyTicks(0)` via a mixin interface that only existed under
+`fabric/src/main/java/.../mixin/` — `neoforge/src/main/java/.../mixin/MinecraftServerAccess.java`
+now mirrors it, registered in `neoforge/src/main/resources/voxyworldgenv2.mixins.json`. Both are the
+same "changed shared code in `common/`, left a NeoForge call site or platform file behind" pattern
+that made `LodSendQueue`/`TabHud`/`LodMemory` inert earlier. **Every change to `common/` still needs
+a `:neoforge:compileJava` check**, not just `:fabric:build` — it is a bonus target, not a free one.
 
 `common/` is touched in exactly two places, both of which must stay 1.21.1-compatible:
 `core/Config.java` (plain Java + Gson) and, in plan 2, `integration/VoxyIntegration.rawIngest`.
@@ -166,7 +176,7 @@ Verify with `grep -rn "net.fabricmc" common/src/main/java/` — it must return n
 | 2 | Network reconciliation — merge the two NetworkHandlers, protocol 5, LodSendQueue | **done** |
 | 3 | Commands and client GUI — `command/`, settings screen, tab HUD, LodMemory | **done** |
 | 4 | Spawn pre-generation | **done** |
-| 5 | Deployment to `xps@192.168.1.23` | **done — live** |
+| 5 | Deployment to `razer@192.168.1.29` | **done — live** |
 
 Plan 1: `docs/superpowers/plans/2026-08-19-plan1-foundation.md`
 Plan 2: `docs/superpowers/plans/2026-08-19-plan2-network-reconciliation.md`
@@ -174,13 +184,80 @@ Plans 4 & 5: `docs/superpowers/plans/2026-08-19-plan4-5-spawn-pregen-and-deploy.
 
 ## State: all five plans complete
 
-`:fabric:test` runs **14 classes / 78 tests, all green**. The server is **live** at
-`xps@192.168.1.23:25565` and pre-generating around spawn with nobody connected.
+`:fabric:test` runs **23 classes / 119 tests, all green** (2026-08-21, after the convergence-guards
+port below). This line has drifted stale three times already (14/78, then 17/88, then 20/108), so
+re-run before quoting it: `JAVA_HOME=/opt/homebrew/opt/openjdk@25 ./gradlew :fabric:test --rerun`.
 
-**The one thing nobody has verified: no client has connected yet.** The protocol-5 handshake, the
-join gate, `LodMemory`'s upload, the settings screen and the tab HUD are all unexercised end to end.
-The modpack jar was replaced with the same 2.4.3 build, so both sides speak protocol 5 by
-construction, but that is an argument, not a test.
+The server is **live on `razer@192.168.1.29:25566`** (= `vanilla.alextoddslick.net`), NOT on xps.
+`xps@192.168.1.23` died 2026-08-20 of a failed SODIMM and is not coming back without hardware work.
+
+**Ported 2026-08-21 — five safety mechanisms the version branches (`port/26.2` etc.) had weeks
+before unified.** The convergence plan assumed unified was strictly ahead; a reverse audit
+(`~/Downloads/voxy-gen-tests-20260821/results/convergence-audit-reverse.md`, full evidence in
+`~/Downloads/voxy-gen-tests-20260821/results/convergence-p25-unified-guards.md`) found five it was
+missing, all in the player/worker-loop safety-net layer, all live-exposed:
+
+1. **`PlayerTracker.players` is now `Map<UUID, ServerPlayer>`**, not an identity-keyed
+   `Set<ServerPlayer>`. Highest priority — Minecraft constructs a new `ServerPlayer` instance for
+   the same UUID on respawn and dimension change, so the old `Set` could never evict the stale
+   instance, anchoring the generation worker to a phantom forever.
+2. **`PlayerTracker.reconcile(MinecraftServer)`** — ported, called once a second from
+   `ChunkGenerationManager.tick()`. `ServerPlayConnectionEvents.DISCONNECT` is not guaranteed to
+   fire on a real dedicated server (measured on a Carpet fake player dying); reconcile is the
+   second, independent layer of the same fix as #1.
+3. **`pauseForTransition()`** now actually sets `generationPausedUntilMs` on join and dimension
+   change, wired from `checkPlayerMovement` via a local `lastPlayerLevels` map (separate from
+   `PlayerTracker.lastDimension`, which is already primed at join and so cannot itself signal one).
+   `isTransitionPaused()` existed already; it was permanently `false` before this.
+4. **`reapStuckTasks()`** — ported, called on the same once-a-second cadence as reconcile, wired to
+   the previously-dead `Config.stuckTaskTimeoutSeconds`. Reclaims a throttle permit from a
+   generation task whose future never resolves. Adapted for unified's spawn pre-generation (which
+   `port/26.2` does not have): when nobody is online anywhere, every dimension gets the *full*
+   timeout rather than the short "no players in this dimension" grace, or the pregen target's own
+   legitimately in-flight tasks would be reaped prematurely.
+5. **`Services.NETWORK.isSendQueueSaturated()` now has a caller** — `workerLoop()` backs off when
+   the LOD send queue is at capacity, instead of dispatching at full speed into a saturated sender.
+
+Adapted, not copied: unified's worker loop is per-player work-stealing (`budget`/`exhausted[]`),
+structurally different from the version branches' one-batch-per-iteration shape, so each mechanism
+was re-derived for unified's actual call sites rather than pasted in. Regression tests added:
+`PlayerTrackerIdentityKeyingTest` (simulates a respawn — same UUID, new object identity — and
+asserts no phantom entry survives), `ChunkGenerationManagerTransitionPauseTest`,
+`ChunkGenerationManagerStuckTaskReaperTest`. None of the five had any test before this pass.
+`isSendQueueSaturated`'s new call site lives inside `workerLoop()`'s infinite loop, which — like the
+rest of that method — is not unit-testable in this harness; see the results doc for why.
+
+**`:neoforge:build` now succeeds** (it did not before this pass — see "Placement rule" above for
+what was actually broken and the stale doc claim that hid it).
+
+**Verified 2026-08-21** — full record in `~/Downloads/voxy-gen-tests-20260821/HANDOFF.md`:
+
+- The **batch-boundary termination fix works.** A from-scratch radius-48 run generated exactly 7056
+  chunks and stopped: the worker accumulated < 1 ms CPU per 18 s afterwards and a thread dump had
+  zero hits inside `DistanceGraph.findWork`. The batch geometry was confirmed analytically
+  (`rb = (r+3)>>2`, whole 4x4 blocks) and reproduces the recorded −89-chunk delta at radius 128.
+- A **live restart at radius 128 does not spin**: 16 samples over 4 min at `active tasks 0/40`,
+  151,399 cached chunks reloaded intact, ~24 s downtime.
+- **All four `sendAsync` skip paths correctly un-mark** via `setSyncedState(player, pos, false)`
+  (`NetworkHandler.java:707-727`) — the invariant that reintroduces the terrain hole is intact.
+- **All three historically-inert components are wired**, with call sites: `LodSendQueue`
+  (`ServerEventHandler.java:16` → `FabricNetworkBridge.java:41` → `NetworkHandler.java:642`),
+  `TabHud` (`VoxyWorldGenV2Fabric.java:50`), `LodMemory` (`NetworkClientHandler.java:188`,
+  `VoxyWorldGenV2Client.java:31/40`). **`LodMemory` is in `fabric/src/client/java`, not `main`** —
+  a `main`-only grep will wrongly report it orphaned all over again.
+
+**Still unverified: no real client has ever connected.** The protocol-5 wire handshake, the join
+gate's real trigger chain, `LodMemory.tick`'s scheduling and disk persistence, `upload()`'s send,
+and all rendering (settings screen, tab HUD, the mid-distance LOD band) remain untested end to end.
+The 2026-08-21 tests narrowed this (`JoinGateTest`, `NetworkStateProtocolGateTest`, `LodMemoryTest`)
+but cannot close it. Client kit staged at `~/Downloads/voxy-gen-test-CLIENT/`.
+
+**A from-scratch radius-128 completion has still never been run** — only radius 48 from scratch, and
+radius 128 from a warm cache. To close it, wipe the gen cache on a *copy* of the live world.
+
+**The 1.21.1 lineage has no spawn pre-generation at all.** `spawnPregenEnabled`, `spawnPregenRadius`
+and `dispatchSpawnPregen` exist only on 26.2 — confirmed by `javap` on both jars' `Config$ConfigData`.
+On 1.21.1, generation is purely player-anchored, so an empty BMC3 server generates nothing by design.
 
 Deployment details, tuning and the 26.x world layout: see the plans 4 & 5 record.
 
@@ -256,10 +333,12 @@ plan 3.
 
 ## Known issues inherited from `upstream/unified`
 
-- **`ChunkGenerationManager.java:692`** claims *"old emptyTicks reset is gone, that field isn't
-  here"* and drops the reset. False on 26.2: `MinecraftServer.emptyTicks` exists, the
-  `MinecraftServerAccess` `@Accessor` is still compiled and listed in `voxyworldgenv2.mixins.json`,
-  and nothing calls it. `origin/port/26.2` does it correctly at line 706. Load-bearing for plan 4.
+- **Resolved, corrected 2026-08-21** (this bullet was itself stale): `ChunkGenerationManager`'s
+  `cleanupTask` used to claim the old `emptyTicks` reset was gone. It is not gone on 26.2 —
+  `MinecraftServer.emptyTicks` exists, the `MinecraftServerAccess` `@Accessor` mixin was already
+  compiled and wired on `:fabric` by the time this convergence pass started, `cleanupTask` does
+  call it. The only real gap was `:neoforge`, which had no `MinecraftServerAccess` mixin of its own
+  until this pass added one (see "Placement rule" above) — fixed, not merely documented.
 - **Main-thread `getChunk` sites** at `ChunkGenerationManager.java:295`, `:427`/`:428`, and
   `ChunkUpdateTracker.java:102`. `ServerChunkCache.getChunk(x, z, load)` is never safe on the main
   thread — `load=false` only skips adding a ticket, the call still `managedBlock`s on the chunk's
