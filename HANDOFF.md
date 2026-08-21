@@ -1,8 +1,31 @@
 # Voxy World Gen V2 — Handoff
 
 Fabric mod that background-generates chunks and streams LOD data for Voxy. Upstream targets
-MC 1.21.6–1.21.11; **this working tree is on branch `backport/1.21.1`** (MC 1.21.1,
-Fabric loader 0.17.2, Java 21).
+MC 1.21.6–1.21.11; **this working tree is on branch `port/1.21.11`** (MC 1.21.11, Java 21).
+Everything below this point through "Test setup" predates this branch's split from
+`backport/1.21.1` and describes THAT branch's history (BetterEndAddons, the old Mac/Windows
+test rig, etc.) — read it for background, but do not trust its branch name, jar filename, or
+version numbers for `port/1.21.11`.
+
+## Convergence phase 3 (2026-08-21): protocol 5 + spawn pre-generation
+
+Brought this branch from protocol 2 to protocol 5 (all 9 payloads registered: the original
+`HandshakePayload`/`KnownChunksPayload`/`LODDataPayload` plus new `HandshakeAckPayload`,
+`ServerConfigPayload`, `ServerConfigPushPayload`, `SettingsSnapshotPayload`,
+`SettingsUpdatePayload`, `StorageReportPayload`), added spawn-anchored pre-generation
+(`Config.DATA.spawnPregenEnabled`/`spawnPregenRadius`, `ChunkGenerationManager.dispatchSpawnPregen`),
+and ported down `ChunkUpdateTracker`'s per-section design, `TpsMonitor`'s graduated load factor,
+and `fairnessCursor`/`failCounts` retry-give-up from `port/unified-26.2`. Version stamped
+`2.6.0+mc1.21.11`. Full detail, Yarn/Mojmap translation notes, and the phase-1/singleplayer
+regression re-verification are in
+`~/Downloads/voxy-gen-tests-20260821/results/convergence-p3-port-1.21.11.md` — read that first for
+anything touching this branch's networking or generation code.
+
+**Not ported**: the fork's separate settings-screen GUI feature (`VoxyWorldGenSettingsScreen`,
+`SettingsApplier`, `PlayerHistory`, `ClientStorageReporter`, per-player rate/send-distance
+overrides). That is `feature/per-player-limits` scope, which this branch never merged — only
+`backport/1.21.1` has it. `SettingsSnapshotPayload`/`SettingsUpdatePayload` exist here as wire
+format only, registered and functional server-side, with no client screen consuming them yet.
 
 ## Repos
 
