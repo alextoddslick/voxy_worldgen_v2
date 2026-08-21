@@ -15,7 +15,43 @@ Fabric loader 0.17.2, Java 21).
 - Pairs with the community Voxy 1.21.1 backport:
   https://github.com/m3t4f1v3/voxy/tree/mc_1211-sodium0.8.12 (linked in README).
 
-## Session handoff (2026-08-06, evening) — READ FIRST
+## Session handoff (2026-08-21) — READ FIRST — supersedes protocol/version info below
+
+This branch is now part of a coordinated multi-branch convergence effort; the shared plan lives at
+`~/temp/Github-NOTSYNCED/voxy-convergence-2026-08-21.md` (branch map, JDK paths, versioning scheme —
+read that first if picking this back up). Two things changed today, both committed locally, **not
+pushed** (never push this branch to `upstream`; only Alex pushes):
+
+- **Merged `feature/per-player-limits` in** (commit `eeb30dd`) — that branch, not the old
+  `backport/1.21.1` head, is what is actually deployed on the BMC3 server. This branch is now
+  **protocol 4** (was 2): per-player limits, HUD stat toggles, client disk report, wire-accurate
+  throttling, the `/voxygen settings` Server Settings screen (protocol ≥4 clients), the hold-Tab HUD
+  fix for singleplayer, and removal of the raw-bytes stat. It was a real (non-fast-forward) merge —
+  git auto-resolved cleanly with no conflict markers; the only overlapping file was
+  `ChunkGenerationManager.java`, where the two branches' changes landed on non-overlapping lines.
+  Two phase-1 bug fixes (see below) were verified by hand, post-merge, to still be intact.
+- **Version stamped to `2.4.0+mc1.21.1`** (commit `110ae75`) per the pinned `<base>+mc<MC_VERSION>`
+  scheme in the convergence doc — `version=` in `gradle.properties`, which templates into
+  `fabric.mod.json` and the jar filename. The startup log line (`VoxyWorldGenV2.onInitialize`) now
+  also prints the version, read back from `FabricLoader`'s mod metadata rather than hardcoded, so it
+  can never drift from the jar name: `"voxy world gen v2 initializing (version 2.4.0+mc1.21.1)"`.
+
+Also on this branch already (earlier today, commits `884615a`/`b56659f`, ported from
+`port/unified-26.2`): a `DistanceGraph.recursiveMark` race that could strand a batch below its
+completion mask forever, a missing per-chunk radius filter in `collectCompletedInRange`, catch-up
+sync starving players after the first one with work, and a "success-but-not-sent" hole where a
+catch-up load that succeeded but whose send got skipped was never marked deferred. All four were
+re-checked by hand after the merge and are present and unchanged.
+
+Test suite grew from 5 classes / 40 tests to **13 classes / 78 tests**, all green (`./gradlew test`,
+Java 21: `JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home`). Full report:
+`~/Downloads/voxy-gen-tests-20260821/results/convergence-p2a-backport-1.21.1.md`.
+
+**Next up per the convergence plan (not done in this session):** phase 3 brings this branch to
+protocol 5 + spawn-anchored pre-generation, at which point it moves to the shared `2.6.0+mc1.21.1`.
+Do not pre-empt that here.
+
+## Session handoff (2026-08-06, evening)
 
 **Nothing below is committed, except this repo's `ChunkGenerationManager.java`/`ChunkUpdateTracker.java`
 fixes, which landed as `a6403b2` at the start of the client-LOD-memory work.** `BetterEndAddons` still
@@ -206,12 +242,13 @@ cause not confirmed beyond this.
 ## Build
 
 ```sh
-JAVA_HOME="$(/usr/libexec/java_home -v 21)" ./gradlew build
-# → build/libs/Voxy World Gen V2-1.21.1-2.2.4.jar
+# NOTE: write JAVA_HOME literally — $(/usr/libexec/java_home -v 21) resolves to x86_64 on this Mac.
+JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home ./gradlew build
+# → build/libs/Voxy World Gen V2-1.21.1-2.4.0+mc1.21.1.jar
 ```
 
-**Deploy after every change** (per Alex): copy the jar (renamed
-`voxyworldgenv2-1.21.1-2.2.4.jar`) into `~/Downloads/mods/` and re-zip that folder to
+**Deploy after every change** (per Alex): copy the jar (renamed to match, e.g.
+`voxyworldgenv2-1.21.1-2.4.0+mc1.21.1.jar`) into `~/Downloads/mods/` and re-zip that folder to
 `~/Downloads/mods.zip` — that's what he transfers to the Windows client. Also keep
 `~/Downloads/voxy-server/mods/` (the live Mac server) in sync so client and server run the
 same build; the mod is needed on BOTH sides. Do NOT bother re-syncing the
