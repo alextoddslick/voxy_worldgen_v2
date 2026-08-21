@@ -18,7 +18,7 @@ public class VoxyWorldGenV2 implements ModInitializer {
 
     @Override
     public void onInitialize() {
-        LOGGER.info("voxy world gen v2 initializing (version {})", modVersion());
+        LOGGER.info("voxy world gen v2 initializing (version {}, MC {})", modVersion(), mcVersion());
         com.ethan.voxyworldgenv2.core.Config.load();
         NetworkHandler.init();
         
@@ -53,6 +53,22 @@ public class VoxyWorldGenV2 implements ModInitializer {
     private static String modVersion() {
         return FabricLoader.getInstance().getModContainer(MOD_ID)
             .map(c -> c.getMetadata().getVersion().getFriendlyString())
+            .orElse("unknown");
+    }
+
+    /**
+     * Reads the MC version stamped into {@code fabric.mod.json}'s custom data from
+     * {@code gradle.properties}' {@code minecraft_version} at build time (see the same
+     * {@code processResources} block that stamps {@link #modVersion()}'s value). Used by
+     * {@code /voxygen status} instead of a literal so the printed version can't drift from the
+     * jar it's actually running in after a port -- the same failure mode {@link #modVersion()}
+     * exists to prevent, just for the MC version instead of the mod version.
+     */
+    public static String mcVersion() {
+        return FabricLoader.getInstance().getModContainer(MOD_ID)
+            .map(c -> c.getMetadata().getCustomValue("voxyworldgenv2:minecraft_version"))
+            .filter(java.util.Objects::nonNull)
+            .map(v -> v.getAsString())
             .orElse("unknown");
     }
 }

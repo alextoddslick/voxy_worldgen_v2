@@ -33,5 +33,8 @@
   },
   "suggests": {
     "voxy": "*"
+  },
+  "custom": {
+    "voxyworldgenv2:minecraft_version": "${minecraft_version}"
   }
 }
