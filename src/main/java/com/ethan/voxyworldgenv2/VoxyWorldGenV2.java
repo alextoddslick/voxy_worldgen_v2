@@ -46,11 +46,13 @@ public class VoxyWorldGenV2 implements ModInitializer {
     /**
      * Reads the version FabricLoader parsed out of {@code fabric.mod.json}, which is itself
      * stamped from {@code gradle.properties}' {@code version} at build time (see
-     * {@code processResources} in build.gradle). Sourcing the startup log line from here rather
-     * than a literal means the log and the jar filename can never disagree about what build this
-     * is — the exact ambiguity that made five differently-built jars all claim "2.2.5".
+     * {@code processResources} in build.gradle). Sourcing the startup log line -- and
+     * {@code VoxyGenCommand.status()}'s reply -- from here rather than a literal means the log,
+     * the jar filename and the in-game reply can never disagree about what build this is, or what
+     * MC version it targets (the version string itself carries {@code +mc<version>}) — the exact
+     * ambiguity that made five differently-built jars all claim "2.2.5".
      */
-    private static String modVersion() {
+    public static String modVersion() {
         return FabricLoader.getInstance().getModContainer(MOD_ID)
             .map(c -> c.getMetadata().getVersion().getFriendlyString())
             .orElse("unknown");

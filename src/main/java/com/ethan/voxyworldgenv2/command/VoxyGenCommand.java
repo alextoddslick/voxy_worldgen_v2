@@ -1,5 +1,6 @@
 package com.ethan.voxyworldgenv2.command;
 
+import com.ethan.voxyworldgenv2.VoxyWorldGenV2;
 import com.ethan.voxyworldgenv2.core.ChunkGenerationManager;
 import com.ethan.voxyworldgenv2.core.Config;
 import com.ethan.voxyworldgenv2.core.PlayerTracker;
@@ -227,7 +228,11 @@ public final class VoxyGenCommand {
         var stats = mgr.getStats();
         var q = LodSendQueue.getInstance();
 
-        reply(ctx, "§6Voxy World Gen V2§r  (MC 26.1.2)");
+        // Read the running version from the build config -- the same source the startup log line
+        // uses -- rather than a literal. A hardcoded "(MC x.y.z)" here silently lies after a port
+        // to a different MC version; VoxyWorldGenV2.modVersion() carries the target MC version in
+        // its own "+mc<version>" suffix, stamped from gradle.properties at build time, so it can't.
+        reply(ctx, "§6Voxy World Gen V2§r  (v" + VoxyWorldGenV2.modVersion() + ")");
         reply(ctx, String.format("  generation: %s   players tracked: %d",
             Config.DATA.enabled ? "§aon§r" : "§coff§r", PlayerTracker.getInstance().getPlayerCount()));
         reply(ctx, String.format("  chunks: §a%d§r done, §e%d§r queued, §c%d§r failed, %d skipped",
