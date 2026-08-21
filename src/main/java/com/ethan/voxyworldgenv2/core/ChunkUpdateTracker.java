@@ -1,20 +1,40 @@
 package com.ethan.voxyworldgenv2.core;
 
 import com.ethan.voxyworldgenv2.network.NetworkHandler;
+import net.minecraft.core.SectionPos;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.chunk.LevelChunk;
 
-import net.minecraft.resources.ResourceKey;
-import net.minecraft.world.level.Level;
-import java.util.Set;
+import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
+import it.unimi.dsi.fastutil.ints.IntSet;
+
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+// tracks which chunk sections changed so we only resend the ones that did
 public class ChunkUpdateTracker {
     private static final ChunkUpdateTracker INSTANCE = new ChunkUpdateTracker();
-    private final Map<ResourceKey<Level>, Set<Long>> dirtyChunks = new ConcurrentHashMap<>();
+
+    // dimension -> (chunk key -> set of dirty section y-levels)
+    private final Map<ResourceKey<Level>, Map<Long, IntSet>> dirty = new ConcurrentHashMap<>();
     private final Map<ResourceKey<Level>, Long> lastProcessTimes = new ConcurrentHashMap<>();
+
+    // cap chunks handled per cycle so a burst of activity (tnt, fluids, fire) can't spike the tick
+    private static final int MAX_CHUNKS_PER_CYCLE = 64;
+    // floor so update_interval=1 can't hammer the tick
+    private static final long MIN_PROCESS_INTERVAL_MS = 500;
+
+    // how often to flush dirty sections, driven by update_interval (ticks)
+    private static long processIntervalMs() {
+        return Math.max(MIN_PROCESS_INTERVAL_MS, Config.DATA.update_interval * 50L);
+    }
 
     private ChunkUpdateTracker() {}
 
@@ -22,38 +42,80 @@ public class ChunkUpdateTracker {
         return INSTANCE;
     }
 
-    public void markDirty(LevelChunk chunk) {
-        dirtyChunks.computeIfAbsent(chunk.getLevel().dimension(), k -> ConcurrentHashMap.newKeySet())
-                .add(chunk.getPos().pack());
+    // mark the section containing blockY dirty for this chunk
+    public void markDirty(LevelChunk chunk, int blockY) {
+        // this fires for every block change (fluids, fire, redstone), so bail before
+        // any map work when nobody is online to receive a resend
+        if (PlayerTracker.getInstance().getPlayerCount() == 0) return;
+
+        long key = chunk.getPos().pack();
+        Map<Long, IntSet> levelDirty = dirty.computeIfAbsent(chunk.getLevel().dimension(), k -> new ConcurrentHashMap<>());
+
+        // cap the backlog so a redstone/fluid storm can't grow it forever, a dropped
+        // chunk gets re-marked next sweep over it
+        int cap = Config.DATA.maxQueueSize;
+        if (cap > 0 && !levelDirty.containsKey(key) && levelDirty.size() >= cap) return;
+
+        int sectionY = SectionPos.blockToSectionCoord(blockY);
+        IntSet set = levelDirty.computeIfAbsent(key, k -> new IntOpenHashSet());
+        synchronized (set) {
+            set.add(sectionY);
+        }
     }
 
     public void processDirty(ServerLevel level) {
         if (level == null) return;
-        
-        Set<Long> levelDirty = dirtyChunks.get(level.dimension());
+
+        Map<Long, IntSet> levelDirty = dirty.get(level.dimension());
         if (levelDirty == null || levelDirty.isEmpty()) return;
 
-        // throttle processing to every 2 seconds (40 ticks)
         long now = System.currentTimeMillis();
         long lastTime = lastProcessTimes.getOrDefault(level.dimension(), 0L);
-        if (now - lastTime < 2000) return;
+        if (now - lastTime < processIntervalMs()) return;
         lastProcessTimes.put(level.dimension(), now);
 
-        Set<Long> toProcess = new java.util.HashSet<>(levelDirty);
-        
-        for (long posLong : toProcess) {
+        List<ServerPlayer> players = new ArrayList<>();
+        for (ServerPlayer p : PlayerTracker.getInstance().getPlayers()) {
+            if (p.level() == level) players.add(p);
+        }
+
+        int processed = 0;
+        Iterator<Map.Entry<Long, IntSet>> it = levelDirty.entrySet().iterator();
+        while (it.hasNext() && processed < MAX_CHUNKS_PER_CYCLE) {
+            Map.Entry<Long, IntSet> entry = it.next();
+            it.remove();
+
+            long posLong = entry.getKey();
+            IntSet src = entry.getValue();
             ChunkPos pos = ChunkPos.unpack(posLong);
-            // processDirty runs on the server tick thread, so this must never block: getChunk's
-            // false only skips adding a ticket, and under C2ME it still parks the main thread on
-            // an incomplete FULL future that nothing will drive. A chunk that isn't resident is
-            // simply skipped; BlockUpdateMixin re-marks it dirty on the next block change.
+
+            // skip chunks no player is near, broadcast still gates per player
+            if (!anyPlayerNear(players, pos)) continue;
+
+            // snapshot the dirty set so a concurrent markDirty can't mutate it mid-read
+            IntSet sectionYs;
+            synchronized (src) {
+                sectionYs = new IntOpenHashSet(src);
+            }
+
+            // getChunkNow: this runs from tick() on the main thread for every active dimension.
+            // getChunk's false-load flag only skips adding a ticket, it does not make the call
+            // non-blocking, so a chunk that isn't resident is simply skipped here; BlockUpdateMixin
+            // re-marks it dirty on the next block change if it turns out to matter later.
             LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z());
             if (chunk != null) {
-                NetworkHandler.broadcastLODData(chunk);
+                NetworkHandler.broadcastLODData(chunk, sectionYs);
+                processed++;
             }
         }
-        
-        // remove only what we processed to avoid losing concurrent additions
-        levelDirty.removeAll(toProcess);
+    }
+
+    private static boolean anyPlayerNear(List<ServerPlayer> players, ChunkPos pos) {
+        for (ServerPlayer p : players) {
+            double dx = p.getX() - pos.getMiddleBlockX();
+            double dz = p.getZ() - pos.getMiddleBlockZ();
+            if (dx * dx + dz * dz <= NetworkHandler.LOD_SYNC_MAX_DIST_SQ) return true;
+        }
+        return false;
     }
 }
