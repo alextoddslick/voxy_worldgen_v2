@@ -228,7 +228,7 @@ public final class VoxyGenCommand {
         var stats = mgr.getStats();
         var q = LodSendQueue.getInstance();
 
-        reply(ctx, "§6Voxy World Gen V2§r  (MC " + VoxyWorldGenV2.mcVersion() + ")");
+        reply(ctx, "§6Voxy World Gen V2§r  v" + VoxyWorldGenV2.modVersion());
         reply(ctx, String.format("  generation: %s   players tracked: %d",
             Config.DATA.enabled ? "§aon§r" : "§coff§r", PlayerTracker.getInstance().getPlayerCount()));
         reply(ctx, String.format("  chunks: §a%d§r done, §e%d§r queued, §c%d§r failed, %d skipped",

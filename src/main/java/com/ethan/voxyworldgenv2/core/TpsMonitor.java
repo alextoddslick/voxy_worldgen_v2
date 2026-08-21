@@ -16,7 +16,17 @@ public class TpsMonitor {
     private static final double MSPT_HARD = 75.0;
 
     public void tick() {
-        long now = System.nanoTime();
+        tick(System.nanoTime());
+    }
+
+    /**
+     * Visible for testing: lets a test drive deterministic timestamps instead of sleeping.
+     * Sleeping to simulate tick spacing makes the assertions depend on the machine's real load --
+     * a 5ms sleep overshoots the 45ms soft threshold on a busy box, so the test fails at random
+     * and, worse, trains you to dismiss genuine regressions as flake.
+     */
+    void tick(long nowNanos) {
+        long now = nowNanos;
         if (lastTickNanos > 0) {
             recentTickTimes[tickTimeIndex] = now - lastTickNanos;
             tickTimeIndex = (tickTimeIndex + 1) % recentTickTimes.length;

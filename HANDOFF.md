@@ -1,5 +1,37 @@
 # Voxy World Gen V2 — Handoff
 
+## CURRENT STATE (2026-08-21) — READ THIS FIRST, THE REST OF THIS FILE IS OLDER
+
+**This worktree is on `port/26.1.2`** (MC 26.1.2, Java 25) — *not* `backport/1.21.1`, whatever older
+sections below say.
+
+**Remote names, corrected.** Older text here has these inverted, which is how you push to the
+wrong place:
+
+| Remote | URL | Rule |
+|---|---|---|
+| `origin` | `alextoddslick/voxy_worldgen_v2` — Alex's fork | push here |
+| `upstream` | `iSeeEthan/voxy_worldgen_v2` | **NEVER push.** Its custom LICENSE only permits forking in order to contribute back, so keep changes PR-able. |
+
+There is no `fork` remote any more.
+
+State after the 2026-08-21 convergence work:
+
+- **Protocol 5**, all 9 payloads registered.
+- **Spawn-anchored pre-generation** present.
+- Version **`2.6.0+mc26.1.2`**. The `+mc` suffix carries the Minecraft version, so it identifies the build
+  completely — `/voxygen status` and the startup log both print it via
+  `VoxyWorldGenV2.modVersion()`, read from loader metadata. Nothing hardcodes a version any more:
+  this branch previously printed a *wrong* MC version inherited from the branch it was forked from.
+- Carries the five safety guards (UUID-keyed `PlayerTracker`, `reconcile()`, `pauseForTransition()`,
+  `reapStuckTasks()`, send-queue backpressure) plus the batch-boundary termination fix.
+
+Full record of that work: `~/temp/Github-NOTSYNCED/voxy-convergence-2026-08-21.md` and
+`~/Downloads/voxy-gen-tests-20260821/`.
+
+---
+
+
 Fabric mod that background-generates chunks and streams LOD data for Voxy. Upstream targets
 MC 1.21.6–1.21.11; **this working tree is on branch `backport/1.21.1`** (MC 1.21.1,
 Fabric loader 0.17.2, Java 21).
