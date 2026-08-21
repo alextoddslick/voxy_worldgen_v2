@@ -231,6 +231,44 @@ public final class Config {
         public int refreshPermissionLevel = 2;
         // What "/voxygen refresh near" means, in chunks.
         public int refreshDefaultRadius = 16;
+        // Keep filling a radius around world spawn when nobody is online. The chunk system keeps
+        // ticking on an empty server, but the mod's worker is player-anchored, so without this it
+        // simply idles. Rate-limited through maxChunksPerSecond like everything else.
+        public boolean spawnPregenEnabled = true;
+        // Radius in chunks around spawn. 128 is ~205k chunks: a multi-hour to multi-day background
+        // fill on a 4-core box, which is what it is designed for.
+        public int spawnPregenRadius = 128;
+    }
+
+    /**
+     * The subset of settings an operator can push from the client's ModMenu/Cloth screen when
+     * connected to a remote server. Kept as a fixed-shape record because it is serialised on the
+     * wire ({@code NetworkHandler.ServerConfigPayload}/{@code ServerConfigPushPayload}): adding a
+     * component is a protocol change.
+     */
+    public record ServerConfig(boolean enabled, int generationRadius, int updateInterval,
+                               int maxQueueSize, int maxActiveTasks) {
+        public static ServerConfig snapshot() {
+            return new ServerConfig(DATA.enabled, DATA.generationRadius, DATA.update_interval,
+                    DATA.maxQueueSize, DATA.maxActiveTasks);
+        }
+    }
+
+    /**
+     * Applies an operator-pushed config. Every value is clamped here rather than trusted, because
+     * the sender is a client: the Cloth sliders use these same bounds (see ModMenuIntegration), so
+     * a value outside them means a hand-crafted packet, not a UI mistake.
+     */
+    public static void applyServerConfig(ServerConfig sc) {
+        DATA.enabled = sc.enabled();
+        DATA.generationRadius = clamp(sc.generationRadius(), 1, 512);
+        DATA.update_interval = clamp(sc.updateInterval(), 1, 200);
+        DATA.maxQueueSize = Math.max(0, sc.maxQueueSize());
+        DATA.maxActiveTasks = clamp(sc.maxActiveTasks(), 1, 128);
+    }
+
+    private static int clamp(int v, int lo, int hi) {
+        return Math.max(lo, Math.min(hi, v));
     }
 }
 
