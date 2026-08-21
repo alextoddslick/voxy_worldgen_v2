@@ -31,14 +31,24 @@ public class NetworkHandler {
     public static final ResourceLocation HANDSHAKE_ACK_ID = ResourceLocation.parse(VoxyWorldGenV2.MOD_ID + ":handshake_ack");
     public static final ResourceLocation SETTINGS_SNAPSHOT_ID = ResourceLocation.parse(VoxyWorldGenV2.MOD_ID + ":settings_snapshot");
     public static final ResourceLocation SETTINGS_UPDATE_ID = ResourceLocation.parse(VoxyWorldGenV2.MOD_ID + ":settings_update");
+    public static final ResourceLocation SERVER_CONFIG_ID = ResourceLocation.parse(VoxyWorldGenV2.MOD_ID + ":server_config");
+    public static final ResourceLocation SERVER_CONFIG_PUSH_ID = ResourceLocation.parse(VoxyWorldGenV2.MOD_ID + ":server_config_push");
 
     /**
      * Bumped whenever a payload is added or its wire format changes. Serverbound payloads are
      * gated on the version the server advertises (known-chunks needs ≥2, the storage report ≥3,
-     * the settings screen ≥4), because sending a payload a server has not registered can drop the
-     * connection.
+     * the settings screen ≥4, the server-config push ≥5), because sending a payload a server has
+     * not registered can drop the connection. Gates are always floors (>=), never equality: a
+     * newer server must keep accepting everything an older one did.
      */
-    public static final int PROTOCOL_VERSION = 4;
+    public static final int PROTOCOL_VERSION = 5;
+
+    // op level required to edit server config from the client. 1.21.1 has no
+    // src.permissions().hasPermission(...) (that is a 26.2-only API); hasPermissions(level) is
+    // the equivalent used everywhere else on this branch (see receiveSettingsUpdate).
+    private static boolean canEditConfig(ServerPlayer player) {
+        return player.hasPermissions(2);
+    }
 
     // Keep individual packets well under the protocol ceiling to prevent connection resets on
     // public servers. The binding limit for a clientbound custom payload in 1.21.1 is
@@ -284,6 +294,70 @@ public class NetworkHandler {
     }
 
     /**
+     * Server -> client: the live server values (the subset {@link com.ethan.voxyworldgenv2.core.Config.ServerConfig}
+     * covers) plus whether this client may edit them. Sent right after the handshake ack, and again
+     * after any accepted {@link ServerConfigPushPayload}, so a client-side screen never has to guess.
+     */
+    public record ServerConfigPayload(com.ethan.voxyworldgenv2.core.Config.ServerConfig config,
+                                      boolean canEdit) implements CustomPacketPayload {
+        public static final Type<ServerConfigPayload> TYPE = new Type<>(SERVER_CONFIG_ID);
+        public static final StreamCodec<FriendlyByteBuf, ServerConfigPayload> CODEC =
+            CustomPacketPayload.codec(ServerConfigPayload::write, ServerConfigPayload::new);
+
+        public ServerConfigPayload(FriendlyByteBuf buf) {
+            this(readServerConfig(buf), buf.readBoolean());
+        }
+
+        public void write(FriendlyByteBuf buf) {
+            writeServerConfig(buf, config);
+            buf.writeBoolean(canEdit);
+        }
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
+    /**
+     * Client -> server: an op pushes edited values from the ModMenu/Cloth screen. The permission
+     * check happens on receipt, not client-side, for the same reason {@code receiveSettingsUpdate}
+     * re-checks: the screen being reachable proves nothing about the sender's current rank.
+     */
+    public record ServerConfigPushPayload(com.ethan.voxyworldgenv2.core.Config.ServerConfig config)
+        implements CustomPacketPayload {
+        public static final Type<ServerConfigPushPayload> TYPE = new Type<>(SERVER_CONFIG_PUSH_ID);
+        public static final StreamCodec<FriendlyByteBuf, ServerConfigPushPayload> CODEC =
+            CustomPacketPayload.codec(ServerConfigPushPayload::write, ServerConfigPushPayload::new);
+
+        public ServerConfigPushPayload(FriendlyByteBuf buf) {
+            this(readServerConfig(buf));
+        }
+
+        public void write(FriendlyByteBuf buf) {
+            writeServerConfig(buf, config);
+        }
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
+    private static com.ethan.voxyworldgenv2.core.Config.ServerConfig readServerConfig(FriendlyByteBuf buf) {
+        return new com.ethan.voxyworldgenv2.core.Config.ServerConfig(
+            buf.readBoolean(), buf.readVarInt(), buf.readVarInt(), buf.readVarInt(), buf.readVarInt());
+    }
+
+    private static void writeServerConfig(FriendlyByteBuf buf, com.ethan.voxyworldgenv2.core.Config.ServerConfig c) {
+        buf.writeBoolean(c.enabled());
+        buf.writeVarInt(c.generationRadius());
+        buf.writeVarInt(c.updateInterval());
+        buf.writeVarInt(c.maxQueueSize());
+        buf.writeVarInt(c.maxActiveTasks());
+    }
+
+    /**
      * Everything the settings screen renders, in one S2C payload: the editable values (already
      * resolved to the profile the commands would edit), the HUD toggles, a live-stats strip, and —
      * for ops only — the player table. Sent on /voxygen settings and again after every applied
@@ -422,18 +496,58 @@ public class NetworkHandler {
         PayloadTypeRegistry.playC2S().register(HandshakeAckPayload.TYPE, HandshakeAckPayload.CODEC);
         PayloadTypeRegistry.playS2C().register(SettingsSnapshotPayload.TYPE, SettingsSnapshotPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(SettingsUpdatePayload.TYPE, SettingsUpdatePayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(ServerConfigPayload.TYPE, ServerConfigPayload.CODEC);
+        PayloadTypeRegistry.playC2S().register(ServerConfigPushPayload.TYPE, ServerConfigPushPayload.CODEC);
 
         ServerPlayNetworking.registerGlobalReceiver(KnownChunksPayload.TYPE,
             (payload, context) -> receiveKnownChunks(context.player(), payload));
         ServerPlayNetworking.registerGlobalReceiver(StorageReportPayload.TYPE,
             (payload, context) -> receiveStorageReport(context.player(), payload));
         ServerPlayNetworking.registerGlobalReceiver(HandshakeAckPayload.TYPE,
-            (payload, context) -> PlayerTracker.getInstance()
-                .setClientProtocol(context.player().getUUID(), payload.clientProtocol()));
+            (payload, context) -> {
+                // Record rather than compare: a mismatch is not a reason to send nothing, features
+                // are gated on floors, so an older client keeps receiving terrain and is simply not
+                // offered payloads its build cannot parse. setClientProtocol must run before
+                // sendServerConfig, which reads the recorded value indirectly through canEditConfig.
+                PlayerTracker.getInstance().setClientProtocol(context.player().getUUID(), payload.clientProtocol());
+                sendServerConfig(context.player());
+            });
         ServerPlayNetworking.registerGlobalReceiver(SettingsUpdatePayload.TYPE,
             (payload, context) -> receiveSettingsUpdate(context.player(), payload));
+        ServerPlayNetworking.registerGlobalReceiver(ServerConfigPushPayload.TYPE,
+            (payload, context) -> receiveServerConfigPush(context.player(), payload));
 
         VoxyWorldGenV2.LOGGER.info("voxy networking initialized (protocol {})", PROTOCOL_VERSION);
+    }
+
+    /**
+     * Applies an operator's server-config push. Mirrors {@code receiveSettingsUpdate}'s per-packet
+     * permission re-check: the client having sent the packet at all proves nothing about its
+     * current rank, and a deopped player's stale screen must become a no-op, not an edit.
+     */
+    private static void receiveServerConfigPush(ServerPlayer player, ServerConfigPushPayload payload) {
+        if (!canEditConfig(player)) {
+            VoxyWorldGenV2.LOGGER.warn("ignoring server config push from non-op {}", player.getName().getString());
+            sendServerConfig(player); // snap their screen back to the real values
+            return;
+        }
+        com.ethan.voxyworldgenv2.core.Config.applyServerConfig(payload.config());
+        com.ethan.voxyworldgenv2.core.Config.save();
+        com.ethan.voxyworldgenv2.core.ChunkGenerationManager.getInstance().scheduleConfigReload();
+        VoxyWorldGenV2.LOGGER.info("server config updated by op {}", player.getName().getString());
+        broadcastServerConfig();
+    }
+
+    /** Sends the live server config to one player; {@code canEdit} reflects their op status. */
+    public static void sendServerConfig(ServerPlayer player) {
+        ServerPlayNetworking.send(player, new ServerConfigPayload(
+            com.ethan.voxyworldgenv2.core.Config.ServerConfig.snapshot(), canEditConfig(player)));
+    }
+
+    public static void broadcastServerConfig() {
+        for (ServerPlayer player : PlayerTracker.getInstance().getPlayers()) {
+            sendServerConfig(player);
+        }
     }
 
     /**
@@ -655,9 +769,21 @@ public class NetworkHandler {
     }
 
     public static void broadcastLODData(LevelChunk chunk) {
+        broadcastLODData(chunk, null);
+    }
+
+    /**
+     * Same as {@link #broadcastLODData(LevelChunk)}, but when {@code sectionYs} is non-null only
+     * those sections are sent rather than the whole chunk. Used by {@link com.ethan.voxyworldgenv2.core.ChunkUpdateTracker}
+     * so a handful of block edits resend a handful of sections, not every non-air section in the
+     * chunk. Safe to send a subset: the client ingests {@code LODDataPayload.SectionData} entries
+     * one section at a time (see {@code NetworkClientHandler.handleLODData}), so a partial payload
+     * merges into what Voxy already holds rather than replacing it.
+     */
+    public static void broadcastLODData(LevelChunk chunk, it.unimi.dsi.fastutil.ints.IntSet sectionYs) {
         ChunkPos pos = chunk.getPos();
         int minY = chunk.getMinSection();
-        List<LodSendQueue.PendingSection> sections = snapshotSections(chunk);
+        List<LodSendQueue.PendingSection> sections = snapshotSections(chunk, sectionYs);
 
         if (sections.isEmpty()) return;
 
@@ -693,7 +819,7 @@ public class NetworkHandler {
         ChunkPos pos = chunk.getPos();
         int minY = chunk.getMinSection();
         ResourceKey<Level> dimension = chunk.getLevel().dimension();
-        List<LodSendQueue.PendingSection> sections = snapshotSections(chunk);
+        List<LodSendQueue.PendingSection> sections = snapshotSections(chunk, null);
 
         if (sections.isEmpty()) {
             setSyncedState(player, dimension, pos, false);
@@ -723,7 +849,8 @@ public class NetworkHandler {
      * {@code copy()}, and at 64 entries against block states' 4096 it is not worth depending on the
      * concrete type to move. Light layers must be read on the main thread regardless.
      */
-    private static List<LodSendQueue.PendingSection> snapshotSections(LevelChunk chunk) {
+    private static List<LodSendQueue.PendingSection> snapshotSections(
+            LevelChunk chunk, it.unimi.dsi.fastutil.ints.IntSet sectionYFilter) {
         ChunkPos pos = chunk.getPos();
         int minY = chunk.getMinSection();
         List<LodSendQueue.PendingSection> sections = new ArrayList<>();
@@ -733,6 +860,7 @@ public class NetworkHandler {
         for (int i = 0; i < chunk.getSections().length; i++) {
             LevelChunkSection section = chunk.getSections()[i];
             if (section == null || section.hasOnlyAir()) continue;
+            if (sectionYFilter != null && !sectionYFilter.contains(minY + i)) continue;
 
             byte[] biomes;
             io.netty.buffer.ByteBuf biomesRaw = io.netty.buffer.Unpooled.buffer();

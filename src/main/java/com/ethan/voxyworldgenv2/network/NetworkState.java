@@ -51,6 +51,11 @@ public class NetworkState {
         return serverConnected && serverProtocol >= 3;
     }
 
+    /** The server registered the server-config push payload (protocol 5). */
+    public static boolean supportsServerConfig() {
+        return serverConnected && serverProtocol >= 5;
+    }
+
     public static void incrementReceived(long bytes) {
         chunksReceived.incrementAndGet();
         bytesReceived.addAndGet(bytes);

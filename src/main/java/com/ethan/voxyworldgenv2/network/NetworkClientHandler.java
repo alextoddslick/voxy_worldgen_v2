@@ -38,6 +38,10 @@ public class NetworkClientHandler {
             });
         });
 
+        ClientPlayNetworking.registerGlobalReceiver(NetworkHandler.ServerConfigPayload.TYPE, (payload, context) -> {
+            context.client().execute(() -> ServerConfigState.set(payload.config(), payload.canEdit()));
+        });
+
         ClientPlayNetworking.registerGlobalReceiver(NetworkHandler.SettingsSnapshotPayload.TYPE, (payload, context) -> {
             context.client().execute(() -> {
                 var mc = context.client();

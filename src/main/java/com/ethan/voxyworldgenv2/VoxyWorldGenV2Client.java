@@ -30,6 +30,7 @@ public class VoxyWorldGenV2Client implements ClientModInitializer {
         // reset connection state on disconnect
         net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
             com.ethan.voxyworldgenv2.network.NetworkState.setServerConnected(false);
+            com.ethan.voxyworldgenv2.network.ServerConfigState.clear();
             com.ethan.voxyworldgenv2.client.LodMemory.onDisconnect();
             com.ethan.voxyworldgenv2.client.ClientStorageReporter.onDisconnect();
         });

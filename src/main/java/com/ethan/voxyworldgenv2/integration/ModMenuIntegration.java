@@ -115,10 +115,34 @@ public class ModMenuIntegration implements ModMenuApi {
 
             builder.setSavingRunnable(() -> {
                 Config.save();
-                com.ethan.voxyworldgenv2.core.ChunkGenerationManager.getInstance().scheduleConfigReload();
+                // Meaningful only when this client IS the server (singleplayer/LAN): Config.DATA
+                // here is this JVM's own copy. On a genuinely remote dedicated server it is a
+                // separate file the server never reads, so editing it above is a silent no-op --
+                // exactly the bug ServerConfigPushPayload (protocol 5) exists to close. Push the
+                // subset it covers over the wire whenever this client is actually connected
+                // remotely and the server has both registered the payload and granted this
+                // session edit rights.
+                if (isOnRemoteServer()) {
+                    if (com.ethan.voxyworldgenv2.network.NetworkState.supportsServerConfig()
+                            && com.ethan.voxyworldgenv2.network.ServerConfigState.canEdit()
+                            && net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking
+                                .canSend(com.ethan.voxyworldgenv2.network.NetworkHandler.ServerConfigPushPayload.TYPE)) {
+                        net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking.send(
+                            new com.ethan.voxyworldgenv2.network.NetworkHandler.ServerConfigPushPayload(
+                                Config.ServerConfig.snapshot()));
+                    }
+                } else {
+                    com.ethan.voxyworldgenv2.core.ChunkGenerationManager.getInstance().scheduleConfigReload();
+                }
             });
-            
+
             return builder.build();
         };
+    }
+
+    /** True when connected to a server other than our own integrated (singleplayer/LAN) one. */
+    private static boolean isOnRemoteServer() {
+        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
+        return mc.getConnection() != null && !mc.hasSingleplayerServer();
     }
 }
