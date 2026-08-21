@@ -272,14 +272,24 @@ public final class ChunkGenerationManager {
                                     .invokeGetChunkFutureMainThread(pos.x(), pos.z(), ChunkStatus.FULL, true)
                                     .whenCompleteAsync((result, throwable) -> {
                                         ServerPlayer target = server.getPlayerList().getPlayer(playerUUID);
+                                        // Track whether the send ACTUALLY happened. Attaching the
+                                        // deferral only to the load-failed branch left a load that
+                                        // SUCCEEDED but whose send was skipped -- player logged off
+                                        // mid-load, or the chunk turned out empty -- falling through
+                                        // both branches: not sent, not deferred, and still claimed
+                                        // from the pre-mark above. That chunk was then lost for the
+                                        // rest of the session.
+                                        boolean sent = false;
                                         if (throwable == null && result != null && result.isSuccess()
                                                 && result.orElse(null) instanceof LevelChunk chunk) {
                                             if (target != null && !chunk.isEmpty()) {
                                                 com.ethan.voxyworldgenv2.network.NetworkHandler.sendLODData(target, chunk);
+                                                sent = true;
                                             }
-                                        } else if (store != null && Config.DATA.rememberSentChunks) {
-                                            // Load failed and the batch was already pre-marked synced,
-                                            // so without this the chunk is claimed and never arrives.
+                                        }
+                                        if (!sent && store != null && Config.DATA.rememberSentChunks) {
+                                            // Claimed but not delivered; onChunkLoad re-sends it on
+                                            // the next load (see SyncedChunkStore.markDeferred).
                                             store.markDeferred(dimId, pos.pack());
                                         }
                                         // Release the ticket only; this chunk was never a generation
