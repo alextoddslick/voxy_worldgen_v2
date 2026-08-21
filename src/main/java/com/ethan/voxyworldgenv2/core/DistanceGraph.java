@@ -51,15 +51,22 @@ public class DistanceGraph {
         if ((node.fullMask & (1L << idx)) != 0) return;
 
         if (node.level == 1) {
-            Integer mask = (Integer) node.children.getOrDefault(idx, 0);
-            mask |= (1 << bit);
-            if (mask == 0xFFFF) {
-                synchronized(node) {
+            // getOrDefault / OR / put is a read-modify-write, and ConcurrentHashMap does not make
+            // that atomic. Two concurrent marks on the same batch lose a bit, and nothing else ever
+            // re-marks a chunk already in completedChunks, so the loss is permanent: a fully
+            // generated batch stuck below 0xFFFF, never full, re-offered by findWork forever. Only
+            // genuinely concurrent on a tellusActive dimension (TellusIntegration.enqueueGenerate
+            // completes on its own pool rather than through server.execute), but the node monitor
+            // was already being taken two lines down, so widening it costs nothing.
+            synchronized (node) {
+                if ((node.fullMask & (1L << idx)) != 0) return;
+                int mask = ((Integer) node.children.getOrDefault(idx, 0)) | (1 << bit);
+                if (mask == 0xFFFF) {
                     node.fullMask |= (1L << idx);
                     node.children.remove(idx);
+                } else {
+                    node.children.put(idx, mask);
                 }
-            } else {
-                node.children.put(idx, mask);
             }
         } else {
             Node child = (Node) node.children.computeIfAbsent(idx, k -> {
@@ -179,6 +186,9 @@ public class DistanceGraph {
         int cbx = center.x >> BATCH_SIZE_SHIFT;
         int cbz = center.z >> BATCH_SIZE_SHIFT;
         int rb = (radiusChunks + 3) >> BATCH_SIZE_SHIFT;
+        final int centerX = center.x;
+        final int centerZ = center.z;
+        final long chunkRadiusSq = (long) radiusChunks * radiusChunks;
 
         // use a priority queue to process chunks from nearest to farthest
         PriorityQueue<CollectItem> queue = new PriorityQueue<>(Comparator.comparingDouble(i -> i.distSq));
@@ -214,6 +224,13 @@ public class DistanceGraph {
                         int lx = i & 3;
                         int lz = i >> 2;
                         ChunkPos pos = new ChunkPos((item.x << 2) + lx, (item.z << 2) + lz);
+                        // Per-chunk radius filter, mirroring findWork. The batch-level test above
+                        // works in 4-chunk units, so without this the emit reaches ~3 chunks past
+                        // radiusChunks -- and the send path's own range check then rejects exactly
+                        // those, forever: claimed, rejected, un-marked, re-collected next pass.
+                        int dxc = pos.x - centerX;
+                        int dzc = pos.z - centerZ;
+                        if ((long) dxc * dxc + (long) dzc * dzc > chunkRadiusSq) continue;
                         if (!alreadySynced.contains(pos.toLong())) {
                             out.add(pos);
                             if (out.size() >= maxResults) return;
