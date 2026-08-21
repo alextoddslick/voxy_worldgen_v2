@@ -296,7 +296,7 @@ public class NetworkHandler {
     }
 
     private static void setSyncedState(ServerPlayer player, ChunkPos pos, boolean isSynced) {
-        var synced = PlayerTracker.getInstance().getSyncedChunks(player.getUUID());
+        var synced = PlayerTracker.getInstance().getSyncedChunks(player.getUUID(), player.level().dimension());
         if (synced != null) {
             if (isSynced) {
                 synced.add(pos.toLong());
