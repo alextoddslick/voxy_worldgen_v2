@@ -247,21 +247,6 @@ public final class VoxyGenCommand {
 
     // ---- handlers -------------------------------------------------------------------------
 
-    /**
-     * The MC version this build actually targets, read out of the mod's own version string
-     * (templated from gradle.properties' {@code version=<base>+mc<MC_VERSION>} at build time) the
-     * same way {@code VoxyWorldGenV2}'s startup log line does, rather than a literal hardcoded
-     * here -- a hardcoded string silently drifts the first time this branch is ported again and
-     * makes {@code /voxygen status} lie about which game version is actually running.
-     */
-    private static String runningMcVersion() {
-        String modVersion = net.fabricmc.loader.api.FabricLoader.getInstance()
-            .getModContainer(VoxyWorldGenV2.MOD_ID)
-            .map(c -> c.getMetadata().getVersion().getFriendlyString())
-            .orElse("unknown");
-        int mcSep = modVersion.indexOf("+mc");
-        return mcSep >= 0 ? modVersion.substring(mcSep + 3) : "unknown";
-    }
 
     private static int status(CommandContext<CommandSourceStack> ctx) {
         if (!ctx.getSource().hasPermission(PERMISSION_OP)) {
@@ -272,7 +257,7 @@ public final class VoxyGenCommand {
         var stats = mgr.getStats();
         var q = LodSendQueue.getInstance();
 
-        reply(ctx, "§6Voxy World Gen V2§r  (MC " + runningMcVersion() + ")");
+        reply(ctx, "§6Voxy World Gen V2§r  v" + VoxyWorldGenV2.modVersion());
         reply(ctx, String.format("  generation: %s   players tracked: %d",
             Config.DATA.enabled ? "§aon§r" : "§coff§r", PlayerTracker.getInstance().getPlayerCount()));
         reply(ctx, String.format("  chunks: §a%d§r done, §e%d§r queued, §c%d§r failed, %d skipped",

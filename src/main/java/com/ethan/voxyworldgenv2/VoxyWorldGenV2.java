@@ -15,17 +15,26 @@ public class VoxyWorldGenV2 implements ModInitializer {
     public static final String MOD_ID = "voxyworldgenv2";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
-    @Override
-    public void onInitialize() {
-        // Read the version back out of fabric.mod.json (templated from gradle.properties'
-        // `version=` at build time) rather than hardcoding it, so this line can never drift from
-        // the jar filename -- five codebases all silently reporting version=2.2.5 at three
-        // different protocol levels is exactly the failure this line exists to make impossible.
-        String modVersion = net.fabricmc.loader.api.FabricLoader.getInstance()
+    /**
+     * The loaded mod version, e.g. {@code "2.6.0+mc1.21.1"}. The {@code +mc} suffix carries the
+     * Minecraft version, so this one string identifies the build completely and nothing needs to
+     * print an MC version separately.
+     *
+     * <p>Read back out of {@code fabric.mod.json} (templated from {@code gradle.properties}'
+     * {@code version=} at build time) rather than hardcoded, so it can never drift from the jar
+     * filename -- five codebases all silently reporting {@code 2.2.5} at three different protocol
+     * levels is exactly the failure this exists to make impossible.
+     */
+    public static String modVersion() {
+        return net.fabricmc.loader.api.FabricLoader.getInstance()
             .getModContainer(MOD_ID)
             .map(c -> c.getMetadata().getVersion().getFriendlyString())
             .orElse("unknown");
-        LOGGER.info("voxy world gen v2 initializing (version {})", modVersion);
+    }
+
+    @Override
+    public void onInitialize() {
+        LOGGER.info("voxy world gen v2 initializing (version {})", modVersion());
         com.ethan.voxyworldgenv2.core.Config.load();
         NetworkHandler.init();
         
