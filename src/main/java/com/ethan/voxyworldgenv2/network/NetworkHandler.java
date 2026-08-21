@@ -25,21 +25,37 @@ import java.util.List;
 
 public class NetworkHandler {
     public static final Identifier HANDSHAKE_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":handshake");
+    public static final Identifier HANDSHAKE_ACK_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":handshake_ack");
     public static final Identifier LOD_DATA_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":lod_data");
+    public static final Identifier SERVER_CONFIG_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":server_config");
+    public static final Identifier SERVER_CONFIG_PUSH_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":server_config_push");
     public static final Identifier KNOWN_CHUNKS_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":known_chunks");
+    public static final Identifier STORAGE_REPORT_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":storage_report");
+    public static final Identifier SETTINGS_SNAPSHOT_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":settings_snapshot");
+    public static final Identifier SETTINGS_UPDATE_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":settings_update");
 
     /**
      * Bumped whenever the payload wire format changes. The client refuses to upload its known-chunk
      * set unless the server advertises at least 2, because sending a payload a server has not
-     * registered can drop the connection.
+     * registered can drop the connection. Protocol 5 adds the handshake ack, server-config
+     * push/pull, storage report and settings sync payloads. Every feature gate derived from this is
+     * a floor ({@code >=}), never equality, so a newer peer keeps serving/accepting everything an
+     * older one did.
      */
-    public static final int PROTOCOL_VERSION = 2;
+    public static final int PROTOCOL_VERSION = 5;
 
     // Keep individual packets well under the protocol ceiling to prevent connection resets on
     // public servers. The binding limit for a clientbound custom payload in 1.21.1 is
     // ClientboundCustomPayloadPacket.MAX_PAYLOAD_SIZE = 1 MiB (the 2 MiB figure is the frame
     // length cap, which is a separate, larger limit) -- so this leaves 32x headroom.
     static final int MAX_PACKET_BYTES = 32_768;
+
+    /** Op level required to edit server config or settings from a client packet. */
+    private static boolean isOp(ServerPlayer player) {
+        return player.permissions().hasPermission(
+            new net.minecraft.server.permissions.Permission.HasCommandLevel(
+                net.minecraft.server.permissions.PermissionLevel.byId(2)));
+    }
 
     public record HandshakePayload(boolean serverHasMod, int protocolVersion) implements CustomPacketPayload {
         public static final Type<HandshakePayload> TYPE = new Type<>(HANDSHAKE_ID);
@@ -59,6 +75,192 @@ public class NetworkHandler {
         public void write(FriendlyByteBuf buf) {
             buf.writeBoolean(this.serverHasMod);
             buf.writeVarInt(this.protocolVersion);
+        }
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
+    /** Client -> server ack carrying the client's protocol, so the server can gate features on a floor. */
+    public record HandshakeAckPayload(int clientProtocol) implements CustomPacketPayload {
+        public static final Type<HandshakeAckPayload> TYPE = new Type<>(HANDSHAKE_ACK_ID);
+        public static final StreamCodec<FriendlyByteBuf, HandshakeAckPayload> CODEC = CustomPacketPayload.codec(HandshakeAckPayload::write, HandshakeAckPayload::new);
+
+        public HandshakeAckPayload(FriendlyByteBuf buf) {
+            this(buf.readVarInt());
+        }
+
+        public void write(FriendlyByteBuf buf) {
+            buf.writeVarInt(this.clientProtocol);
+        }
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
+    /** Server -> client: the live server values plus whether this client may edit them. */
+    public record ServerConfigPayload(com.ethan.voxyworldgenv2.core.Config.ServerConfig config, boolean canEdit) implements CustomPacketPayload {
+        public static final Type<ServerConfigPayload> TYPE = new Type<>(SERVER_CONFIG_ID);
+        public static final StreamCodec<FriendlyByteBuf, ServerConfigPayload> CODEC = CustomPacketPayload.codec(ServerConfigPayload::write, ServerConfigPayload::new);
+
+        public ServerConfigPayload(FriendlyByteBuf buf) {
+            this(readConfig(buf), buf.readBoolean());
+        }
+
+        public void write(FriendlyByteBuf buf) {
+            writeConfig(buf, config);
+            buf.writeBoolean(canEdit);
+        }
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
+    /** Client op pushes new values to apply; permission is re-checked server-side on receipt. */
+    public record ServerConfigPushPayload(com.ethan.voxyworldgenv2.core.Config.ServerConfig config) implements CustomPacketPayload {
+        public static final Type<ServerConfigPushPayload> TYPE = new Type<>(SERVER_CONFIG_PUSH_ID);
+        public static final StreamCodec<FriendlyByteBuf, ServerConfigPushPayload> CODEC = CustomPacketPayload.codec(ServerConfigPushPayload::write, ServerConfigPushPayload::new);
+
+        public ServerConfigPushPayload(FriendlyByteBuf buf) {
+            this(readConfig(buf));
+        }
+
+        public void write(FriendlyByteBuf buf) {
+            writeConfig(buf, config);
+        }
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
+    private static com.ethan.voxyworldgenv2.core.Config.ServerConfig readConfig(FriendlyByteBuf buf) {
+        return new com.ethan.voxyworldgenv2.core.Config.ServerConfig(
+            buf.readBoolean(), buf.readVarInt(), buf.readVarInt(), buf.readVarInt(), buf.readVarInt());
+    }
+
+    private static void writeConfig(FriendlyByteBuf buf, com.ethan.voxyworldgenv2.core.Config.ServerConfig c) {
+        buf.writeBoolean(c.enabled());
+        buf.writeVarInt(c.generationRadius());
+        buf.writeVarInt(c.updateInterval());
+        buf.writeVarInt(c.maxQueueSize());
+        buf.writeVarInt(c.maxActiveTasks());
+    }
+
+    /**
+     * Live settings + generation stats for the settings UI, sent on request and after every
+     * applied update. Scoped to what this branch actually exposes via /voxygen and the settings
+     * book -- unlike unified, this branch carries no per-player admin table (that lives with the
+     * separate per-player-limits feature line, which this port does not carry) and no HUD toggles
+     * in Config, so this is a smaller wire shape by design, not an incomplete copy.
+     */
+    public record SettingsSnapshotPayload(
+        boolean isOp, boolean singleplayerActive,
+        boolean enabled, int generationRadius, int maxActiveTasks, int maxChunksPerSecond,
+        double maxMbpsPerPlayer,
+        long bytesSent, long bytesPerSecond,
+        int queued, int maxQueued, long chunksDone
+    ) implements CustomPacketPayload {
+        public static final Type<SettingsSnapshotPayload> TYPE = new Type<>(SETTINGS_SNAPSHOT_ID);
+        public static final StreamCodec<FriendlyByteBuf, SettingsSnapshotPayload> CODEC =
+            CustomPacketPayload.codec(SettingsSnapshotPayload::write, SettingsSnapshotPayload::new);
+
+        public SettingsSnapshotPayload(FriendlyByteBuf buf) {
+            this(buf.readBoolean(), buf.readBoolean(),
+                buf.readBoolean(), buf.readVarInt(), buf.readVarInt(), buf.readVarInt(),
+                buf.readDouble(),
+                buf.readLong(), buf.readLong(),
+                buf.readVarInt(), buf.readVarInt(), buf.readLong());
+        }
+
+        public void write(FriendlyByteBuf buf) {
+            buf.writeBoolean(isOp);
+            buf.writeBoolean(singleplayerActive);
+            buf.writeBoolean(enabled);
+            buf.writeVarInt(generationRadius);
+            buf.writeVarInt(maxActiveTasks);
+            buf.writeVarInt(maxChunksPerSecond);
+            buf.writeDouble(maxMbpsPerPlayer);
+            buf.writeLong(bytesSent);
+            buf.writeLong(bytesPerSecond);
+            buf.writeVarInt(queued);
+            buf.writeVarInt(maxQueued);
+            buf.writeLong(chunksDone);
+        }
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
+    /**
+     * The screen's edits going back: string-keyed ops applied with the same semantics and clamps
+     * as the matching /voxygen subcommand. Bounded hard at read time -- the op check happens
+     * later, so the codec itself must not let an unauthenticated packet allocate freely.
+     */
+    public record SettingsUpdatePayload(List<Op> ops) implements CustomPacketPayload {
+        public static final Type<SettingsUpdatePayload> TYPE = new Type<>(SETTINGS_UPDATE_ID);
+        public static final StreamCodec<FriendlyByteBuf, SettingsUpdatePayload> CODEC =
+            CustomPacketPayload.codec(SettingsUpdatePayload::write, SettingsUpdatePayload::new);
+
+        public static final int MAX_OPS = 64;
+
+        public record Op(String key, String value) {
+            void write(FriendlyByteBuf buf) {
+                buf.writeUtf(key, 96);
+                buf.writeUtf(value, 64);
+            }
+
+            static Op read(FriendlyByteBuf buf) {
+                return new Op(buf.readUtf(96), buf.readUtf(64));
+            }
+        }
+
+        public SettingsUpdatePayload(FriendlyByteBuf buf) {
+            this(readOps(buf));
+        }
+
+        private static List<Op> readOps(FriendlyByteBuf buf) {
+            int count = buf.readVarInt();
+            if (count < 0 || count > MAX_OPS) {
+                throw new io.netty.handler.codec.DecoderException("settings update too large: " + count);
+            }
+            List<Op> ops = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) ops.add(Op.read(buf));
+            return ops;
+        }
+
+        public void write(FriendlyByteBuf buf) {
+            buf.writeVarInt(ops.size());
+            for (Op op : ops) op.write(buf);
+        }
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
+    /** Client -> server: how many bytes of LOD data this client's Voxy store holds on disk. */
+    public record StorageReportPayload(long bytesOnDisk) implements CustomPacketPayload {
+        public static final Type<StorageReportPayload> TYPE = new Type<>(STORAGE_REPORT_ID);
+        public static final StreamCodec<FriendlyByteBuf, StorageReportPayload> CODEC =
+            CustomPacketPayload.codec(StorageReportPayload::write, StorageReportPayload::new);
+
+        public StorageReportPayload(FriendlyByteBuf buf) {
+            this(buf.readLong());
+        }
+
+        public void write(FriendlyByteBuf buf) {
+            buf.writeLong(bytesOnDisk);
         }
 
         @Override
@@ -225,10 +427,170 @@ public class NetworkHandler {
         PayloadTypeRegistry.clientboundPlay().register(LODDataPayload.TYPE, LODDataPayload.CODEC);
         PayloadTypeRegistry.serverboundPlay().register(KnownChunksPayload.TYPE, KnownChunksPayload.CODEC);
 
+        PayloadTypeRegistry.serverboundPlay().register(HandshakeAckPayload.TYPE, HandshakeAckPayload.CODEC);
+        PayloadTypeRegistry.clientboundPlay().register(ServerConfigPayload.TYPE, ServerConfigPayload.CODEC);
+        PayloadTypeRegistry.serverboundPlay().register(ServerConfigPushPayload.TYPE, ServerConfigPushPayload.CODEC);
+        PayloadTypeRegistry.serverboundPlay().register(StorageReportPayload.TYPE, StorageReportPayload.CODEC);
+        PayloadTypeRegistry.clientboundPlay().register(SettingsSnapshotPayload.TYPE, SettingsSnapshotPayload.CODEC);
+        PayloadTypeRegistry.serverboundPlay().register(SettingsUpdatePayload.TYPE, SettingsUpdatePayload.CODEC);
+
         ServerPlayNetworking.registerGlobalReceiver(KnownChunksPayload.TYPE,
             (payload, context) -> receiveKnownChunks(context.player(), payload));
 
+        // Client protocol arrives here so features can be gated on a floor; the server's own
+        // config and settings snapshot go straight back so a client that just acked never has to
+        // ask separately for either.
+        ServerPlayNetworking.registerGlobalReceiver(HandshakeAckPayload.TYPE, (payload, context) -> {
+            ServerPlayer player = context.player();
+            PlayerTracker.getInstance().setClientProtocol(player.getUUID(), payload.clientProtocol());
+            if (payload.clientProtocol() != PROTOCOL_VERSION) {
+                VoxyWorldGenV2.LOGGER.info("client {} speaks voxy protocol {} (ours={}), serving what it supports",
+                    player.getName().getString(), payload.clientProtocol(), PROTOCOL_VERSION);
+            }
+            sendServerConfig(player);
+            sendSettingsSnapshot(player);
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(ServerConfigPushPayload.TYPE, (payload, context) -> {
+            ServerPlayer player = context.player();
+            if (!isOp(player)) {
+                VoxyWorldGenV2.LOGGER.warn("ignoring server config push from non-op {}", player.getName().getString());
+                sendServerConfig(player); // snap their screen back to the real values
+                return;
+            }
+            com.ethan.voxyworldgenv2.core.Config.applyServerConfig(payload.config());
+            com.ethan.voxyworldgenv2.core.Config.save();
+            com.ethan.voxyworldgenv2.core.ChunkGenerationManager.getInstance().scheduleConfigReload();
+            VoxyWorldGenV2.LOGGER.info("server config updated by op {}", player.getName().getString());
+            broadcastServerConfig();
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(StorageReportPayload.TYPE,
+            (payload, context) -> receiveStorageReport(context.player(), payload));
+
+        ServerPlayNetworking.registerGlobalReceiver(SettingsUpdatePayload.TYPE,
+            (payload, context) -> receiveSettingsUpdate(context.player(), payload));
+
         VoxyWorldGenV2.LOGGER.info("voxy networking initialized (protocol {})", PROTOCOL_VERSION);
+    }
+
+    /** Sends the live server config to one player; canEdit reflects their own op status. */
+    public static void sendServerConfig(ServerPlayer player) {
+        ServerPlayNetworking.send(player, new ServerConfigPayload(
+            com.ethan.voxyworldgenv2.core.Config.ServerConfig.snapshot(), isOp(player)));
+    }
+
+    public static void broadcastServerConfig() {
+        for (ServerPlayer player : PlayerTracker.getInstance().getPlayers()) {
+            sendServerConfig(player);
+        }
+    }
+
+    /**
+     * Stores the client's disk-usage figure. A negative count is a malformed or hostile packet,
+     * not a value, so it is dropped rather than clamped -- it must never render as "0 B" and read
+     * as truth.
+     */
+    private static void receiveStorageReport(ServerPlayer player, StorageReportPayload payload) {
+        if (payload.bytesOnDisk() < 0) return;
+        PlayerTracker.getInstance().reportClientStoreBytes(player.getUUID(), payload.bytesOnDisk());
+    }
+
+    /**
+     * Applies a settings-screen batch. The permission check happens HERE, per packet -- the screen
+     * being open proves nothing, and a deopped player's stale screen must turn into a no-op, not
+     * an edit. A fresh snapshot goes back either way so the screen re-renders truth.
+     */
+    private static void receiveSettingsUpdate(ServerPlayer player, SettingsUpdatePayload payload) {
+        if (!isOp(player)) {
+            VoxyWorldGenV2.LOGGER.warn("ignoring settings update from non-op {}", player.getName().getString());
+            sendSettingsSnapshot(player);
+            return;
+        }
+
+        boolean sp = com.ethan.voxyworldgenv2.core.ChunkGenerationManager.getInstance().isSingleplayer();
+        var data = com.ethan.voxyworldgenv2.core.Config.DATA;
+        boolean spActive = sp && data.singleplayer != null && data.singleplayer.enableSingleplayerDefaults;
+
+        int applied = 0;
+        for (SettingsUpdatePayload.Op op : payload.ops()) {
+            if (applySettingsOp(op, spActive)) applied++;
+        }
+        if (applied > 0) {
+            com.ethan.voxyworldgenv2.core.Config.save();
+            com.ethan.voxyworldgenv2.core.ChunkGenerationManager.getInstance().scheduleConfigReload();
+            VoxyWorldGenV2.LOGGER.info("{} applied {} settings change(s) via the settings screen",
+                player.getName().getString(), applied);
+        }
+        sendSettingsSnapshot(player);
+    }
+
+    /** Same key set, semantics and clamps as the matching /voxygen subcommand. */
+    private static boolean applySettingsOp(SettingsUpdatePayload.Op op, boolean spActive) {
+        var data = com.ethan.voxyworldgenv2.core.Config.DATA;
+        try {
+            switch (op.key()) {
+                case "radius" -> {
+                    int v = clampInt(op.value(), 1, 512);
+                    if (spActive) data.singleplayer.generationRadius = v; else data.generationRadius = v;
+                }
+                case "tasks" -> {
+                    int v = clampInt(op.value(), 1, 128);
+                    if (spActive) data.singleplayer.maxActiveTasks = v; else data.maxActiveTasks = v;
+                }
+                case "queue" -> data.maxQueueSize = clampInt(op.value(), 100, 1_000_000);
+                case "enabled" -> data.enabled = Boolean.parseBoolean(op.value());
+                case "ratelimit" -> {
+                    double v = clampDouble(op.value(), 0.0, 1000.0);
+                    if (spActive) data.singleplayer.maxMbpsPerPlayer = v; else data.maxMbpsPerPlayer = v;
+                }
+                case "genrate" -> {
+                    int v = clampInt(op.value(), 0, 100_000);
+                    if (spActive) data.singleplayer.maxChunksPerSecond = v; else data.maxChunksPerSecond = v;
+                }
+                case "loginterval" -> data.logProgressIntervalSeconds = clampInt(op.value(), 0, 3600);
+                case "singleplayer" -> {
+                    if (data.singleplayer == null) {
+                        data.singleplayer = new com.ethan.voxyworldgenv2.core.Config.SingleplayerConfig();
+                    }
+                    data.singleplayer.enableSingleplayerDefaults = Boolean.parseBoolean(op.value());
+                }
+                default -> {
+                    return false;
+                }
+            }
+            return true;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    private static int clampInt(String value, int lo, int hi) {
+        return Math.max(lo, Math.min(hi, Integer.parseInt(value.trim())));
+    }
+
+    private static double clampDouble(String value, double lo, double hi) {
+        return Math.max(lo, Math.min(hi, Double.parseDouble(value.trim())));
+    }
+
+    /** Builds and sends the settings screen's live state. */
+    public static void sendSettingsSnapshot(ServerPlayer player) {
+        var mgr = com.ethan.voxyworldgenv2.core.ChunkGenerationManager.getInstance();
+        var data = com.ethan.voxyworldgenv2.core.Config.DATA;
+        var q = LodSendQueue.getInstance();
+        boolean sp = mgr.isSingleplayer();
+        boolean spActive = sp && data.singleplayer != null && data.singleplayer.enableSingleplayerDefaults;
+
+        ServerPlayNetworking.send(player, new SettingsSnapshotPayload(
+            isOp(player), spActive,
+            data.enabled,
+            com.ethan.voxyworldgenv2.core.Config.getGenerationRadius(sp),
+            com.ethan.voxyworldgenv2.core.Config.getMaxActiveTasks(sp),
+            com.ethan.voxyworldgenv2.core.Config.getMaxChunksPerSecond(sp),
+            com.ethan.voxyworldgenv2.core.Config.getMaxMbpsPerPlayer(sp),
+            q.getBytesSent(), q.getCurrentBytesPerSecond(),
+            q.getQueuedJobs(), q.getMaxQueuedJobs(),
+            mgr.getStats().getCompleted()));
     }
 
     /**
@@ -316,36 +678,59 @@ public class NetworkHandler {
             .isGated(player.getUUID(), PlayerTracker.dimensionId(dimension));
     }
 
+    /** Distance beyond which a chunk is not worth streaming as LOD data to a player. */
+    public static final double LOD_SYNC_MAX_DIST_SQ = 4096.0 * 4096.0;
+
     public static void broadcastLODData(LevelChunk chunk) {
+        broadcastLODData(chunk, null);
+    }
+
+    /**
+     * Broadcasts a chunk's LOD data. When {@code onlySectionYs} is non-null (a block-edit resend
+     * of just the section(s) that changed, see {@link ChunkUpdateTracker}), the synced set is left
+     * untouched: a partial resend is neither a fresh delivery nor a loss of what was already
+     * delivered, so marking it either way would corrupt the "claimed but not delivered" invariant
+     * that the catch-up path depends on. Only a full sync (the {@code null} overload) may mark or
+     * unmark synced state.
+     */
+    public static void broadcastLODData(LevelChunk chunk, it.unimi.dsi.fastutil.ints.IntSet onlySectionYs) {
         ChunkPos pos = chunk.getPos();
         int minY = chunk.getMinSectionY();
-        List<LodSendQueue.PendingSection> sections = snapshotSections(chunk);
+        boolean fullSync = onlySectionYs == null;
+        List<LodSendQueue.PendingSection> sections = snapshotSections(chunk, onlySectionYs);
 
-        if (sections.isEmpty()) return;
-
-        double maxDistSq = 4096.0 * 4096.0;
-        var registryAccess = chunk.getLevel().registryAccess();
         var dimension = chunk.getLevel().dimension();
+
+        if (sections.isEmpty()) {
+            if (fullSync) {
+                for (ServerPlayer player : PlayerTracker.getInstance().getPlayers()) {
+                    setSyncedState(player, dimension, pos, false);
+                }
+            }
+            return;
+        }
+
+        var registryAccess = chunk.getLevel().registryAccess();
 
         for (ServerPlayer player : PlayerTracker.getInstance().getPlayers()) {
             double dx = player.getX() - (pos.getMiddleBlockX());
             double dz = player.getZ() - (pos.getMiddleBlockZ());
 
-            if (player.level() != chunk.getLevel() || (dx * dx + dz * dz > maxDistSq)) {
-                setSyncedState(player, dimension, pos, false);
+            if (player.level() != chunk.getLevel() || (dx * dx + dz * dz > LOD_SYNC_MAX_DIST_SQ)) {
+                if (fullSync) setSyncedState(player, dimension, pos, false);
                 continue;
             }
 
             if (gated(player, dimension)) {
-                setSyncedState(player, dimension, pos, false);
+                if (fullSync) setSyncedState(player, dimension, pos, false);
                 continue;
             }
 
             boolean accepted = LodSendQueue.getInstance().enqueue(
                 player, dimension, pos, minY, sections, registryAccess);
             // Mirror the enqueue result into the synced set: accepted chunks won't be re-sent by
-            // the catch-up path, dropped ones will be.
-            setSyncedState(player, dimension, pos, accepted);
+            // the catch-up path, dropped ones will be. Only meaningful for a full sync.
+            if (fullSync) setSyncedState(player, dimension, pos, accepted);
         }
     }
 
@@ -384,6 +769,12 @@ public class NetworkHandler {
      * concrete type to move. Light layers must be read on the main thread regardless.
      */
     private static List<LodSendQueue.PendingSection> snapshotSections(LevelChunk chunk) {
+        return snapshotSections(chunk, null);
+    }
+
+    /** {@code onlySectionYs} null = every non-air section; otherwise only the y-levels named. */
+    private static List<LodSendQueue.PendingSection> snapshotSections(
+            LevelChunk chunk, it.unimi.dsi.fastutil.ints.IntSet onlySectionYs) {
         ChunkPos pos = chunk.getPos();
         int minY = chunk.getMinSectionY();
         List<LodSendQueue.PendingSection> sections = new ArrayList<>();
@@ -391,6 +782,9 @@ public class NetworkHandler {
         var registryAccess = chunk.getLevel().registryAccess();
 
         for (int i = 0; i < chunk.getSections().length; i++) {
+            int sectionY = minY + i;
+            if (onlySectionYs != null && !onlySectionYs.contains(sectionY)) continue;
+
             LevelChunkSection section = chunk.getSections()[i];
             if (section == null || section.hasOnlyAir()) continue;
 

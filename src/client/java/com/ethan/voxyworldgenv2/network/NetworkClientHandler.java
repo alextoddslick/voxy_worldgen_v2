@@ -23,6 +23,12 @@ public class NetworkClientHandler {
                 NetworkState.setServerConnected(serverHasMod);
                 NetworkState.setServerProtocol(protocol);
             });
+            // Ack back with what this client build understands, so a protocol-5+ server can gate
+            // on the actual floor rather than assuming. Gates are floors, never equality, so an
+            // older client is simply never offered payloads it cannot parse.
+            if (serverHasMod && ClientPlayNetworking.canSend(NetworkHandler.HandshakeAckPayload.TYPE)) {
+                ClientPlayNetworking.send(new NetworkHandler.HandshakeAckPayload(NetworkHandler.PROTOCOL_VERSION));
+            }
         });
 
         ClientPlayNetworking.registerGlobalReceiver(NetworkHandler.LODDataPayload.TYPE, (payload, context) -> {

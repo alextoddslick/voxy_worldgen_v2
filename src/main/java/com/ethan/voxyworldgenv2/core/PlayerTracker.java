@@ -42,6 +42,12 @@ public class PlayerTracker {
      */
     private final Map<UUID, Map<String, Integer>> knownChunksBudget = new ConcurrentHashMap<>();
 
+    /** The voxy protocol version this player's client last acked, 0 if it never has. */
+    private final Map<UUID, Integer> clientProtocols = new ConcurrentHashMap<>();
+
+    /** Bytes of LOD data the client last reported holding on disk, or absent if never reported. */
+    private final Map<UUID, Long> clientStoreBytes = new ConcurrentHashMap<>();
+
     /**
      * A radius-512 known set is ~1,089 regions, about 6 packets. Well above any legitimate upload
      * and still only a few hundred milliseconds of work if a client spends the whole allowance.
@@ -76,6 +82,8 @@ public class PlayerTracker {
         awaitingKnownSet.remove(id);
         refreshRadius.remove(id);
         knownChunksBudget.remove(id);
+        clientProtocols.remove(id);
+        clientStoreBytes.remove(id);
     }
 
     /**
@@ -96,6 +104,8 @@ public class PlayerTracker {
         awaitingKnownSet.remove(id);
         refreshRadius.remove(id);
         knownChunksBudget.remove(id);
+        clientProtocols.remove(id);
+        clientStoreBytes.remove(id);
     }
 
     public void clear() {
@@ -104,6 +114,28 @@ public class PlayerTracker {
         awaitingKnownSet.clear();
         refreshRadius.clear();
         knownChunksBudget.clear();
+        clientProtocols.clear();
+        clientStoreBytes.clear();
+    }
+
+    /** Records the voxy protocol version a player's client acked the handshake with. */
+    public void setClientProtocol(UUID uuid, int protocol) {
+        clientProtocols.put(uuid, protocol);
+    }
+
+    /** 0 if this player's client never acked (vanilla, or an older build than protocol 5). */
+    public int getClientProtocol(UUID uuid) {
+        return clientProtocols.getOrDefault(uuid, 0);
+    }
+
+    /** Records the client's self-reported LOD-store disk usage from a StorageReportPayload. */
+    public void reportClientStoreBytes(UUID uuid, long bytes) {
+        clientStoreBytes.put(uuid, bytes);
+    }
+
+    /** -1 if this player's client never reported. */
+    public long getClientStoreBytes(UUID uuid) {
+        return clientStoreBytes.getOrDefault(uuid, -1L);
     }
 
     /**

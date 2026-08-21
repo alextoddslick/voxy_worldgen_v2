@@ -41,9 +41,27 @@ public class NetworkState {
         return serverProtocol;
     }
 
-    /** The server registered the known-chunks payload, so sending it will not drop the connection. */
+    /**
+     * Feature gates are floors, never equality: a newer server must keep accepting everything an
+     * older one did. An unregistered serverbound payload drops the connection, which is why the
+     * client checks before sending rather than after failing.
+     */
     public static boolean supportsKnownChunks() {
         return serverConnected && serverProtocol >= 2;
+    }
+
+    /** The server registered the storage-report payload. */
+    public static boolean supportsStorageReport() {
+        return serverConnected && serverProtocol >= 3;
+    }
+
+    /** Handshake ack, server-config push/pull and settings sync all arrived together at 5. */
+    public static boolean supportsServerConfigSync() {
+        return serverConnected && serverProtocol >= 5;
+    }
+
+    public static boolean supportsSettingsSync() {
+        return serverConnected && serverProtocol >= 5;
     }
 
     public static void incrementReceived(long bytes) {
